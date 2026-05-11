@@ -1,0 +1,10 @@
+[package]
+name = "caio/project-doors"
+version = "0.1.0"
+license = "MIT"
+realm = "shared"
+registry = "https://github.com/UpliftGames/wally-index"
+
+[dependencies]
+Knit = "sleitnick/knit@1.7.0"
+Roact = "roblox/roact@1.4.4"
