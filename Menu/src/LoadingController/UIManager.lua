@@ -254,7 +254,6 @@ function LoadingScreen:LoadFinished()
     local function CreditsLoop(Parent,CurrentStep: number)
 		return Promise.new(function(resolve)
 			if Parent:FindFirstChild("Step"..CurrentStep) then
-            	print("Showing credit step", CurrentStep)
             	local Credit = Parent:FindFirstChild("Step"..CurrentStep)
             	Credit.Visible = true
             	Credit.ImageTransparency = 1
@@ -292,6 +291,8 @@ function LoadingScreen:LoadFinished()
         self:ClearDots()
         CreditsLoop(CreditsAndWarning, CurrentStep):await()
 		CurrentCamera.CFrame = workspace:WaitForChild("Cameras"):WaitForChild("Menu").CFrame
+		CurrentCamera.FieldOfView = 55
+		ReplicatedFirst:SetAttribute("Loaded", true)
 		self:Disable()
     end)
 end

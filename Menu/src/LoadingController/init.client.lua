@@ -22,11 +22,13 @@ UIManager:Enable()
 
 UIManager:SetCurrentStepText("Preloader")
 Preloader:AddAssetsToPreload(workspace:WaitForChild("Menu"):GetDescendants())
+Preloader:AddAssetsToPreload(workspace:WaitForChild("MenuUI3D"):GetDescendants())
+Preloader:AddAssetsToPreload(LocalPlayer.PlayerGui:WaitForChild("Loading"):GetDescendants())
 
 Preloader.PreloadStarted:Connect(function(totalAssets)
     print("Preload started", totalAssets)
     TotalAssets = totalAssets
-    UIManager:CreateLoadingDots(math.max(totalAssets, 20), 0.2)
+    UIManager:CreateLoadingDots(math.min(totalAssets, 20), 0.2)
 end)
 
 Preloader.SectionAssetLoaded:Connect(function(typeName, assetIndex, sectionAssetCount, sectionIndex, sectionCount, assetId, assetFetchStatus)
