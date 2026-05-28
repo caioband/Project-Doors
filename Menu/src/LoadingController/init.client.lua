@@ -1,15 +1,25 @@
 local ReplicatedFirst = game:GetService("ReplicatedFirst")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
 local Core = require(script:WaitForChild("Core"))
 local UIManager = require(script:WaitForChild("UIManager"))
+local UIEffectCallbacks = require(
+    ReplicatedStorage
+        :WaitForChild("Shared")
+        :WaitForChild("SharedModules")
+        :WaitForChild("UIEffectCallbacks")
+)
 
 local Preloader = Core.new()
 local AssetsLoadedCount = 0
 local TotalAssets = 0
 ReplicatedFirst:RemoveDefaultLoadingScreen()
 
+UIEffectCallbacks.Start()
 UIManager:Enable()
+
 UIManager:SetCurrentStepText("Preloader")
 Preloader:AddAssetsToPreload(workspace:WaitForChild("Menu"):GetDescendants())
 

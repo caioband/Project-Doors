@@ -6,4 +6,5 @@ realm = "shared"
 registry = "https://github.com/UpliftGames/wally-index"
 
 [dependencies]
-Knit = "sleitnick/knit@1.7.0"
+ezvisualz = "arxkdev/ezvisualz@0.0.6"
+promise = "evaera/promise@4.0.0"

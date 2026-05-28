@@ -5,11 +5,15 @@ local Loading = script.Parent.Parent:WaitForChild("Loading")
 
 local ReplicatedFirst = game:GetService("ReplicatedFirst")
 local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local DOT_ENABLED_COLOR = Color3.fromRGB(255, 221, 87)
 local DOT_RAISE_OFFSET_SCALE = 0.035
 local DOT_TWEEN_INFO = TweenInfo.new(0.05, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
+
+local Packages = ReplicatedStorage:WaitForChild("ExternalPackages")
+local Promise = require(Packages.promise)
 local LoadingScreen = {}
 LoadingScreen.__index = LoadingScreen
 LoadingScreen.DotsAnimating = false
@@ -248,23 +252,27 @@ function LoadingScreen:LoadFinished()
 	end
 
     local function CreditsLoop(Parent,CurrentStep: number)
-        if Parent:FindFirstChild("Step"..CurrentStep) then
-            print("Showing credit step", CurrentStep)
-            local Credit = Parent:FindFirstChild("Step"..CurrentStep)
-            Credit.Visible = true
-            Credit.ImageTransparency = 1
-            local tweenInfo = TweenInfo.new(2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, 0, true)
-            local T = TweenService:Create(Credit, tweenInfo, {
-                ImageTransparency = 0,
-            })
-            T:Play()
-            T.Completed:Connect(function()
-                Credit.Visible = false
-                 CurrentStep += 1
-                task.wait(1)
-                CreditsLoop(Parent, CurrentStep)
-            end)
-        end       
+		return Promise.new(function(resolve)
+			if Parent:FindFirstChild("Step"..CurrentStep) then
+            	print("Showing credit step", CurrentStep)
+            	local Credit = Parent:FindFirstChild("Step"..CurrentStep)
+            	Credit.Visible = true
+            	Credit.ImageTransparency = 1
+            	local tweenInfo = TweenInfo.new(2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out, 0, true)
+            	local T = TweenService:Create(Credit, tweenInfo, {
+            	    ImageTransparency = 0,
+            	})
+            	T:Play()
+            	T.Completed:Connect(function()
+            	    Credit.Visible = false
+            	    CurrentStep += 1
+            	    task.wait(1)
+				    CreditsLoop(Parent, CurrentStep):andThen(resolve)
+            	end)
+			else
+				resolve()
+        	end
+		end)       
     end
 
     local Main = Loading:WaitForChild("Load"):WaitForChild("CurrentStep"):WaitForChild("Initializing")
@@ -277,9 +285,14 @@ function LoadingScreen:LoadFinished()
     TweenDescendantsAsync(Main.Parent.Parent)
 
     task.delay(2, function()
+
         local CurrentStep = 1
+		local CurrentCamera = workspace.CurrentCamera
+		CurrentCamera.CameraType = Enum.CameraType.Scriptable
         self:ClearDots()
-        CreditsLoop(CreditsAndWarning, CurrentStep)
+        CreditsLoop(CreditsAndWarning, CurrentStep):await()
+		CurrentCamera.CFrame = workspace:WaitForChild("Cameras"):WaitForChild("Menu").CFrame
+		self:Disable()
     end)
 end
 
