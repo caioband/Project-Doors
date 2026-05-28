@@ -4,8 +4,8 @@
     "$className": "DataModel",
     "ReplicatedStorage": {
       "$className": "ReplicatedStorage",
-      "Packages": {
-        "$path": "Packages"
+      "ExternalPackages": {
+        "$path": "../Packages"
       },
       "Shared": {
         "$path": "src/shared"
@@ -24,6 +24,12 @@
         "Client": {
           "$path": "src/client"
         }
+      }
+    },
+    "ReplicatedFirst": {
+      "$className": "ReplicatedFirst",
+      "LoadingController": {
+        "$path": "src/LoadingController"
       }
     }
   }

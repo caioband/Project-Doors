@@ -5,16 +5,11 @@ registry = "test"
 [[package]]
 name = "caio/project-doors"
 version = "0.1.0"
-dependencies = [["Knit", "sleitnick/knit@1.7.0"], ["Roact", "roblox/roact@1.4.4"]]
+dependencies = [["Knit", "sleitnick/knit@1.7.0"]]
 
 [[package]]
 name = "evaera/promise"
 version = "4.0.0"
-dependencies = []
-
-[[package]]
-name = "roblox/roact"
-version = "1.4.4"
 dependencies = []
 
 [[package]]
