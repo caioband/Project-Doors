@@ -3,7 +3,8 @@ local Packages = ReplicatedStorage:WaitForChild("ExternalPackages")
 local TweenService = game:GetService("TweenService")
 local ezvisualz = require(Packages:WaitForChild("ezvisualz"))
 
-local OriginCFrame = {}
+local OriginCFrameHover = {}
+local OriginCFrameClick = {}
 local HoverEffects = setmetatable({}, {__mode = "k"})
 
 local SHINE_TWEEN_INFO = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -51,11 +52,11 @@ local function createHoverEffect(guiObject)
     shine.Name = "Shine"
     shine.AnchorPoint = Vector2.new(0.5, 0.5)
     shine.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-    shine.BackgroundTransparency = 0.15
+    shine.BackgroundTransparency = 0.4
     shine.BorderSizePixel = 0
     shine.Position = UDim2.fromScale(-0.18, 0.5)
     shine.Rotation = -18
-    shine.Size = UDim2.fromScale(0.18, 1)
+    shine.Size = UDim2.fromScale(0.05, 0.8)
     shine.ZIndex = container.ZIndex
     shine.Parent = container
 
@@ -81,10 +82,13 @@ end
 return {
     MouseEnter = function(guiObject)
         local Parent = guiObject:FindFirstAncestorWhichIsA("Part")
+        local SurfaceGui = guiObject:FindFirstAncestorWhichIsA("SurfaceGui")
         local CurrentCamera = workspace.CurrentCamera
         if not OriginCFrame[Parent] then
             OriginCFrame[Parent] = Parent.CFrame
         end
+
+        OriginCFrameHover[Parent] = Parent.CFrame
 
         local effect = getHoverEffect(guiObject)
         effect.tween = TweenService:Create(effect.shine, SHINE_TWEEN_INFO, {
@@ -96,11 +100,12 @@ return {
         effect.tween:Play()
 
         TweenService:Create(Parent, TweenInfo.new(1, Enum.EasingStyle.Bounce, Enum.EasingDirection.Out), {CFrame = CFrame.lookAt(Parent.Position, CurrentCamera.CFrame.Position)}):Play() 
+        TweenService:Create(SurfaceGui, TweenInfo.new(.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Brightness = 4}):Play()
     end,
     MouseLeave = function(guiObject)
         destroyHoverEffect(guiObject)
 
-        local Parent = guiObject:FindFirstAncestorWhichIsA("Part") 
+        local Parent = guiObject:FindFirstAncestorWhichIsA("Part")
         TweenService:Create(Parent, TweenInfo.new(1, Enum.EasingStyle.Bounce, Enum.EasingDirection.Out), {CFrame = OriginCFrame[Parent]}):Play()
     end,
 }

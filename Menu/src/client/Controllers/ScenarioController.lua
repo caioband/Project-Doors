@@ -1,8 +1,14 @@
 local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
-local DeviceController = require(script.Parent:WaitForChild("DeviceController"))
+local DeviceController = require(
+    ReplicatedStorage
+        :WaitForChild("Shared")
+        :WaitForChild("SharedModules")
+        :WaitForChild("DeviceController")
+)
 
 local ScenarioController = {}
 
@@ -10,7 +16,7 @@ local LOOK_DISTANCE = 5
 local BOB_HEIGHT = 0.1
 local BOB_SPEED = 0.2
 local CAMERA_SWAY_STRENGTH = 0.03
-local MAX_SWAY_ANGLE = math.rad(30)
+local MAX_SWAY_ANGLE = math.rad(45)
 local CAMERA_SWAY_SMOOTHNESS = 1
 
 function ScenarioController:SetupReferences()
