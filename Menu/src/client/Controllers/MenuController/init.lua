@@ -1,0 +1,126 @@
+local MenuController = {}
+local MenuUI3D = workspace:WaitForChild("MenuUI3D")
+local Player = game.Players.LocalPlayer
+local PlayerGui = Player:WaitForChild("PlayerGui")
+local Lighting = game:GetService("Lighting")
+local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local ConnectionPlus = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("SharedModules"):WaitForChild("ConnectionPlus"))
+local HudFramesVisibilityCallbacks = require(script:WaitForChild("HudFramesVisibilityCallbacks"))
+
+local CurrentBlur
+
+function MenuController:ObserveFrameVisibilityAndExecute(frame : Frame, isVisible : boolean, visibleCallback : () -> (), invisibleCallback : () -> ())
+    
+    if frame then 
+        if isVisible then
+            if CurrentBlur then
+                TweenService:Create(CurrentBlur, TweenInfo.new(0.5), {Size = 24}):Play()
+            end
+            if visibleCallback then
+                visibleCallback()
+            end
+        else
+            if CurrentBlur then
+                TweenService:Create(CurrentBlur, TweenInfo.new(0.5), {Size = 0}):Play()
+            end
+            if invisibleCallback then
+                invisibleCallback()
+            end
+        end
+    end
+end
+
+local function GetButtonPartFromMenuUI3D(buttonName) : Part
+    return MenuUI3D:WaitForChild(buttonName)
+end
+
+
+function MenuController:SetupPlayOptions()
+
+end
+
+function MenuController:PlayButtonCallback()
+    self:SetupPlayOptions()
+end
+
+function MenuController:BindMenuButtons()
+
+    local PlayPart = MenuUI3D:WaitForChild("Play")
+    local PlayButton = PlayPart:FindFirstChildWhichIsA("ImageButton", true)
+
+    local CreditsPart = MenuUI3D:WaitForChild("Credits") 
+    local CreditsButton = CreditsPart:FindFirstChildWhichIsA("ImageButton", true)
+
+    if PlayButton then
+        if PlayButton:GetAttribute("IgnoreCallback") then 
+            PlayButton:SetAttribute("IgnoreCallback", nil)
+        end
+
+        ConnectionPlus:ConnectWithInfo(PlayButton,"MouseButton1Up", PlayButton.MouseButton1Up, function()
+            self:PlayButtonCallback()
+        end)
+
+    end
+    if CreditsButton then
+        if CreditsButton:GetAttribute("IgnoreCallback") then 
+            CreditsButton:SetAttribute("IgnoreCallback", nil)
+        end
+
+        ConnectionPlus:ConnectWithInfo(CreditsButton,"MouseButton1Up", CreditsButton.MouseButton1Up, function()
+            print("Credits Button Clicked")
+        end)
+    end
+end
+
+function MenuController:UnBindMenuButtons()
+    local PlayPart = MenuUI3D:WaitForChild("Play")
+    local PlayButton = PlayPart:FindFirstChildWhichIsA("ImageButton", true)
+
+    local CreditsPart = MenuUI3D:WaitForChild("Credits") 
+    local CreditsButton = CreditsPart:FindFirstChildWhichIsA("ImageButton", true)
+
+    if PlayButton then
+        PlayButton:SetAttribute("IgnoreCallback", true)
+        ConnectionPlus:Disconnect(PlayButton,"MouseButton1Up")
+    end
+    if CreditsButton then
+        CreditsButton:SetAttribute("IgnoreCallback", true)
+        ConnectionPlus:Disconnect(CreditsButton,"MouseButton1Up")
+    end
+end
+
+function MenuController:BindVisibilityForChildren(object : Instance)
+
+    if not object then return end
+
+    self:SetupBlurEffect()
+
+    for i,v in pairs(object:GetChildren()) do
+        if v:IsA("Frame") then
+            v:GetPropertyChangedSignal("Visible"):Connect(function()
+                self:ObserveFrameVisibilityAndExecute(v, v.Visible, HudFramesVisibilityCallbacks["Visible"][v.Name] or , HudFramesVisibilityCallbacks["Invisible"][v.Name] or function() 
+                    print(v.Name .. " is now invisible")
+                end)
+                end,
+            end)
+        end
+    end
+end
+
+function MenuController:SetupBlurEffect()
+    local Blur = Instance.new("BlurEffect")
+    Blur.Size = 0
+    Blur.Parent = Lighting
+    CurrentBlur = Blur
+end
+
+function MenuController:Start()
+    local Hud = PlayerGui:WaitForChild("Hud")
+
+    self:BindVisibilityForChildren(Hud)
+    self:BindMenuButtons()
+end 
+
+return MenuController

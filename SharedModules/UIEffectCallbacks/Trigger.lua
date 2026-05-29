@@ -37,7 +37,7 @@ end
 
 local function resolveCallback(button)
 	local callbackName = button:GetAttribute(HoverTrigger.AttributeName)
-	if type(callbackName) ~= "string" or callbackName == "" then
+	if type(callbackName) ~= "string" or callbackName == "" or button:GetAttribute("IgnoreCallback") then
 		return nil, nil
 	end
 

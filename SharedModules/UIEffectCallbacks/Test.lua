@@ -84,9 +84,6 @@ return {
         local Parent = guiObject:FindFirstAncestorWhichIsA("Part")
         local SurfaceGui = guiObject:FindFirstAncestorWhichIsA("SurfaceGui")
         local CurrentCamera = workspace.CurrentCamera
-        if not OriginCFrame[Parent] then
-            OriginCFrame[Parent] = Parent.CFrame
-        end
 
         OriginCFrameHover[Parent] = Parent.CFrame
 
@@ -99,13 +96,16 @@ return {
         end)
         effect.tween:Play()
 
-        TweenService:Create(Parent, TweenInfo.new(1, Enum.EasingStyle.Bounce, Enum.EasingDirection.Out), {CFrame = CFrame.lookAt(Parent.Position, CurrentCamera.CFrame.Position)}):Play() 
+        TweenService:Create(Parent, TweenInfo.new(1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {CFrame = CFrame.lookAt(Parent.Position, CurrentCamera.CFrame.Position)}):Play() 
         TweenService:Create(SurfaceGui, TweenInfo.new(.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Brightness = 4}):Play()
     end,
     MouseLeave = function(guiObject)
         destroyHoverEffect(guiObject)
 
         local Parent = guiObject:FindFirstAncestorWhichIsA("Part")
-        TweenService:Create(Parent, TweenInfo.new(1, Enum.EasingStyle.Bounce, Enum.EasingDirection.Out), {CFrame = OriginCFrame[Parent]}):Play()
+        local SurfaceGui = guiObject:FindFirstAncestorWhichIsA("SurfaceGui")
+
+        TweenService:Create(Parent, TweenInfo.new(1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {CFrame = OriginCFrameHover[Parent]}):Play()
+        TweenService:Create(SurfaceGui, TweenInfo.new(.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Brightness = 2}):Play()
     end,
 }
