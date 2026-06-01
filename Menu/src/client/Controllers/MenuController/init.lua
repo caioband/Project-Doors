@@ -68,7 +68,7 @@ function MenuController:BindMenuButtons()
             PlayButton:SetAttribute("IgnoreCallback", nil)
         end
 
-        ConnectionPlus:ConnectWithInfo(PlayButton,"MouseButton1Up", PlayButton.MouseButton1Up, function()
+        ConnectionPlus:ConnectWithInfo(PlayButton,"Activated", PlayButton.Activated, function()
             self:PlayButtonCallback()
         end)
 
@@ -80,7 +80,7 @@ function MenuController:BindMenuButtons()
             CreditsButton:SetAttribute("IgnoreCallback", nil)
         end
 
-        ConnectionPlus:ConnectWithInfo(CreditsButton,"MouseButton1Up", CreditsButton.MouseButton1Up, function()
+        ConnectionPlus:ConnectWithInfo(CreditsButton,"Activated", CreditsButton.Activated, function()
             print("Credits Button Clicked")
         end)
     end
@@ -97,13 +97,13 @@ function MenuController:UnBindMenuButtons()
         PlayButton.Active = false
 
         PlayButton:SetAttribute("IgnoreCallback", true)
-        ConnectionPlus:Disconnect(PlayButton,"MouseButton1Up")
+        ConnectionPlus:Disconnect(PlayButton,"Activated")
     end
     if CreditsButton then
         CreditsButton.Active = false
         
         CreditsButton:SetAttribute("IgnoreCallback", true)
-        ConnectionPlus:Disconnect(CreditsButton,"MouseButton1Up")
+        ConnectionPlus:Disconnect(CreditsButton,"Activated")
     end
 end
 

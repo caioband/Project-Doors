@@ -7,6 +7,7 @@ local MIN_MAX_PLAYERS = 1
 local MAX_MAX_PLAYERS = 8
 local COMMS_FOLDER_NAME = "Comms"
 local LOBBY_COMMS_FOLDER_NAME = "Lobby"
+local CREATE_ROOM_FUNCTION_NAME = "CreateRoom"
 local LIST_ROOMS_FUNCTION_NAME = "ListRooms"
 local ROOM_UPDATES_EVENT_NAME = "RoomUpdates"
 
@@ -32,6 +33,10 @@ local function cloneArray(values)
     return clonedValues
 end
 
+local function trimString(value)
+    return string.gsub(value, "^%s*(.-)%s*$", "%1")
+end
+
 local function buildRoomSnapshot(room)
     return {
         id = room.id,
@@ -39,6 +44,7 @@ local function buildRoomSnapshot(room)
         ownerName = room.ownerName,
         name = room.name,
         maxPlayers = room.maxPlayers,
+        roomType = room.roomType,
         isPrivate = room.isPrivate,
         accessCode = room.accessCode,
         playerUserIds = cloneArray(room.playerUserIds),
@@ -76,6 +82,14 @@ function LobbyService:SetupRemotes()
         lobbyFolder.Parent = commsFolder
     end
 
+    local createRoomFunction = lobbyFolder:FindFirstChild(CREATE_ROOM_FUNCTION_NAME)
+
+    if not createRoomFunction then
+        createRoomFunction = Instance.new("RemoteFunction")
+        createRoomFunction.Name = CREATE_ROOM_FUNCTION_NAME
+        createRoomFunction.Parent = lobbyFolder
+    end
+
     local listRoomsFunction = lobbyFolder:FindFirstChild(LIST_ROOMS_FUNCTION_NAME)
 
     if not listRoomsFunction then
@@ -90,6 +104,22 @@ function LobbyService:SetupRemotes()
         roomUpdatesEvent = Instance.new("RemoteEvent")
         roomUpdatesEvent.Name = ROOM_UPDATES_EVENT_NAME
         roomUpdatesEvent.Parent = lobbyFolder
+    end
+
+    createRoomFunction.OnServerInvoke = function(player, roomData)
+        local success, roomOrError, createError = pcall(function()
+            return self:CreateRoom(player, roomData)
+        end)
+
+        if not success then
+            return nil, tostring(roomOrError)
+        end
+
+        if not roomOrError then
+            return nil, tostring(createError)
+        end
+
+        return roomOrError
     end
 
     listRoomsFunction.OnServerInvoke = function(_, includePrivateRooms)
@@ -121,21 +151,54 @@ function LobbyService:ValidateCreateRoomPayload(owner, roomData)
 
     local roomName = roomData.name or string.format("%s's Room", owner.Name)
     local maxPlayers = roomData.maxPlayers or DEFAULT_MAX_PLAYERS
-    local isPrivate = roomData.isPrivate == true
+    local roomType = roomData.roomType
+
+    if roomType ~= nil then
+        assert(type(roomType) == "string", "roomType must be a string")
+
+        local normalizedRoomType = string.lower(trimString(roomType))
+        assert(normalizedRoomType == "public" or normalizedRoomType == "private", "roomType must be Public or Private")
+
+        roomType = normalizedRoomType == "private" and "Private" or "Public"
+    else
+        roomType = roomData.isPrivate == true and "Private" or "Public"
+    end
+
+    local isPrivate = roomType == "Private"
+    local accessCode = nil
 
     assert(type(roomName) == "string", "Room name must be a string")
-    roomName = string.gsub(roomName, "^%s*(.-)%s*$", "%1")
+    roomName = trimString(roomName)
     assert(roomName ~= "", "Room name cannot be empty")
 
     assert(type(maxPlayers) == "number", "maxPlayers must be a number")
     maxPlayers = math.floor(maxPlayers)
     assert(maxPlayers >= MIN_MAX_PLAYERS and maxPlayers <= MAX_MAX_PLAYERS, string.format("maxPlayers must be between %d and %d", MIN_MAX_PLAYERS, MAX_MAX_PLAYERS))
 
+    if isPrivate then
+        local providedAccessCode = roomData.accessCode
+
+        if providedAccessCode ~= nil then
+            assert(type(providedAccessCode) == "string", "accessCode must be a string")
+
+            providedAccessCode = string.upper(trimString(providedAccessCode))
+
+            if providedAccessCode ~= "" then
+                accessCode = providedAccessCode
+            end
+        end
+
+        if not accessCode then
+            accessCode = self:GenerateAccessCode()
+        end
+    end
+
     return {
         name = roomName,
         maxPlayers = maxPlayers,
+        roomType = roomType,
         isPrivate = isPrivate,
-        accessCode = isPrivate and (roomData.accessCode or self:GenerateAccessCode()) or nil,
+        accessCode = accessCode,
     }
 end
 
@@ -156,6 +219,7 @@ function LobbyService:CreateRoom(owner, roomData)
         ownerName = owner.Name,
         name = validatedRoomData.name,
         maxPlayers = validatedRoomData.maxPlayers,
+        roomType = validatedRoomData.roomType,
         isPrivate = validatedRoomData.isPrivate,
         accessCode = validatedRoomData.accessCode,
         playerUserIds = { owner.UserId },
@@ -247,6 +311,7 @@ function LobbyService:UpdateRoom(roomId, updates)
         assert(type(updates.isPrivate) == "boolean", "isPrivate must be a boolean")
 
         room.isPrivate = updates.isPrivate
+        room.roomType = room.isPrivate and "Private" or "Public"
 
         if room.isPrivate and not room.accessCode then
             room.accessCode = self:GenerateAccessCode()

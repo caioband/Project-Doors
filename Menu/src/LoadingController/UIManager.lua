@@ -20,6 +20,16 @@ LoadingScreen.DotsAnimating = false
 LoadingScreen._activeDotTweenCount = 0
 LoadingScreen._dotTweens = {}
 
+local function updateFOV(fov)
+	local viewport = workspace.CurrentCamera.ViewportSize
+	local aspectRatio = viewport.X / viewport.Y
+
+	local baseFov = fov
+	local targetAspect = 16 / 9
+
+	workspace.CurrentCamera.FieldOfView = baseFov * (aspectRatio / targetAspect)
+end
+
 function LoadingScreen:_setDotsAnimatingState(isAnimating: boolean)
 	self.DotsAnimating = isAnimating
 end
@@ -291,7 +301,7 @@ function LoadingScreen:LoadFinished()
         self:ClearDots()
         CreditsLoop(CreditsAndWarning, CurrentStep):await()
 		CurrentCamera.CFrame = workspace:WaitForChild("Cameras"):WaitForChild("Menu").CFrame
-		CurrentCamera.FieldOfView = 55
+		updateFOV(60)
 		ReplicatedFirst:SetAttribute("Loaded", true)
 		self:Disable()
     end)

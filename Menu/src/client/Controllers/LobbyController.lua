@@ -95,7 +95,7 @@ function LobbyController:ApplyRoomDataToSlot(roomSlot, roomData)
     setTextIfPresent(roomSlot, { "RoomName", "Name", "Title" }, roomData.name)
     setTextIfPresent(roomSlot, { "OwnerName", "Owner", "HostName", "Host" }, roomData.ownerName)
     setTextIfPresent(roomSlot, { "PlayerCount", "Players", "Slots", "Capacity" }, getRoomOccupancyText(roomData))
-    setTextIfPresent(roomSlot, { "Privacy", "Status", "RoomType" }, roomData.isPrivate and "Private" or "Public")
+    setTextIfPresent(roomSlot, { "Privacy", "Status", "RoomType" }, roomData.roomType or (roomData.isPrivate and "Private" or "Public"))
 
     if roomData.isPrivate then
         setTextIfPresent(roomSlot, { "AccessCode", "Code", "RoomCode" }, roomData.accessCode or "LOCKED")
