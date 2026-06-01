@@ -85,19 +85,29 @@ return {
         local SurfaceGui = guiObject:FindFirstAncestorWhichIsA("SurfaceGui")
         local CurrentCamera = workspace.CurrentCamera
 
-        OriginCFrameHover[Parent] = Parent.CFrame
+        if not OriginCFrameHover[Parent] then
+            OriginCFrameHover[Parent] = Parent.CFrame
+        end
 
         local effect = getHoverEffect(guiObject)
         effect.tween = TweenService:Create(effect.shine, SHINE_TWEEN_INFO, {
             Position = UDim2.fromScale(1.35, 0.5),
         })
-        effect.tween.Completed:Connect(function()
+        effect.tween.Completed:Once(function()
             destroyHoverEffect(guiObject)
         end)
         effect.tween:Play()
-
         TweenService:Create(Parent, TweenInfo.new(1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {CFrame = CFrame.lookAt(Parent.Position, CurrentCamera.CFrame.Position)}):Play() 
         TweenService:Create(SurfaceGui, TweenInfo.new(.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Brightness = 4}):Play()
+    
+        guiObject:GetPropertyChangedSignal("Active"):Once(function()
+            if effect.tween then
+                effect.tween:Cancel()
+            end 
+            destroyHoverEffect(guiObject)
+            TweenService:Create(Parent, TweenInfo.new(1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {CFrame = OriginCFrameHover[Parent]}):Play()
+            TweenService:Create(SurfaceGui, TweenInfo.new(.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Brightness = 2}):Play()
+        end)
     end,
     MouseLeave = function(guiObject)
         destroyHoverEffect(guiObject)

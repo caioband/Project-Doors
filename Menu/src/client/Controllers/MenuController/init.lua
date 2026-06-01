@@ -9,6 +9,9 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ConnectionPlus = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("SharedModules"):WaitForChild("ConnectionPlus"))
 local HudFramesVisibilityCallbacks = require(script:WaitForChild("HudFramesVisibilityCallbacks"))
 
+
+local RoomOptionsController 
+
 local CurrentBlur
 
 function MenuController:ObserveFrameVisibilityAndExecute(frame : Frame, isVisible : boolean, visibleCallback : () -> (), invisibleCallback : () -> ())
@@ -38,7 +41,12 @@ end
 
 
 function MenuController:SetupPlayOptions()
+    local Hud = PlayerGui:WaitForChild("Hud")
+    local RoomOptions = Hud:WaitForChild("RoomOptions")
 
+    RoomOptions.Visible = true
+    self:UnBindMenuButtons()
+    RoomOptionsController:BindOptionsButtons()
 end
 
 function MenuController:PlayButtonCallback()
@@ -54,6 +62,8 @@ function MenuController:BindMenuButtons()
     local CreditsButton = CreditsPart:FindFirstChildWhichIsA("ImageButton", true)
 
     if PlayButton then
+        PlayButton.Active = true
+
         if PlayButton:GetAttribute("IgnoreCallback") then 
             PlayButton:SetAttribute("IgnoreCallback", nil)
         end
@@ -64,6 +74,8 @@ function MenuController:BindMenuButtons()
 
     end
     if CreditsButton then
+        CreditsButton.Active = true
+       
         if CreditsButton:GetAttribute("IgnoreCallback") then 
             CreditsButton:SetAttribute("IgnoreCallback", nil)
         end
@@ -82,10 +94,14 @@ function MenuController:UnBindMenuButtons()
     local CreditsButton = CreditsPart:FindFirstChildWhichIsA("ImageButton", true)
 
     if PlayButton then
+        PlayButton.Active = false
+
         PlayButton:SetAttribute("IgnoreCallback", true)
         ConnectionPlus:Disconnect(PlayButton,"MouseButton1Up")
     end
     if CreditsButton then
+        CreditsButton.Active = false
+        
         CreditsButton:SetAttribute("IgnoreCallback", true)
         ConnectionPlus:Disconnect(CreditsButton,"MouseButton1Up")
     end
@@ -100,10 +116,16 @@ function MenuController:BindVisibilityForChildren(object : Instance)
     for i,v in pairs(object:GetChildren()) do
         if v:IsA("Frame") then
             v:GetPropertyChangedSignal("Visible"):Connect(function()
-                self:ObserveFrameVisibilityAndExecute(v, v.Visible, HudFramesVisibilityCallbacks["Visible"][v.Name] or , HudFramesVisibilityCallbacks["Invisible"][v.Name] or function() 
-                    print(v.Name .. " is now invisible")
-                end)
-                end,
+                local hasVisibleSiblings = false
+                task.wait()
+                for j,k in pairs(object:GetChildren()) do
+                    if k ~= v and k.Visible == true then 
+                        hasVisibleSiblings = true
+                        break
+                    end
+                end
+                if hasVisibleSiblings then return end
+                self:ObserveFrameVisibilityAndExecute(v, v.Visible, HudFramesVisibilityCallbacks["Visible"][v.Name] , HudFramesVisibilityCallbacks["Invisible"][v.Name])
             end)
         end
     end
@@ -118,6 +140,8 @@ end
 
 function MenuController:Start()
     local Hud = PlayerGui:WaitForChild("Hud")
+    
+    RoomOptionsController = self.GetController("RoomOptionsController")
 
     self:BindVisibilityForChildren(Hud)
     self:BindMenuButtons()

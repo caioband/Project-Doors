@@ -1,17 +1,32 @@
 local ReplicatedFirst = game:GetService("ReplicatedFirst")
 
 while not ReplicatedFirst:GetAttribute("Loaded") do
-    ReplicatedFirst:GetAttributeChangedSignal("Loaded"):Wait()
+	ReplicatedFirst:GetAttributeChangedSignal("Loaded"):Wait()
 end
 
-for i,v in pairs(script:GetChildren()) do
-    if v:IsA("ModuleScript") then
-        local moduleName = v.Name
-        local module = require(v)
-        if not module.Start then
-            warn("Controller " .. moduleName .. " does not have a Start function.")
-        else
-            module:Start()
-        end
-    end
+local Controllers = {}
+
+local function GetController(controllerName)
+	return Controllers[controllerName]
+end
+
+
+for _, child in ipairs(script:GetChildren()) do
+	if child:IsA("ModuleScript") then
+		local controller = require(child)
+
+		Controllers[child.Name] = controller
+	end
+end
+
+
+for _, controller in pairs(Controllers) do
+	controller.GetController = GetController
+end
+
+
+for name, controller in pairs(Controllers) do
+	if type(controller.Start) == "function" then
+		controller:Start()
+	end
 end
