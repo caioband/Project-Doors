@@ -8,3 +8,4 @@ registry = "https://github.com/UpliftGames/wally-index"
 [dependencies]
 ezvisualz = "arxkdev/ezvisualz@0.0.6"
 promise = "evaera/promise@4.0.0"
+cmdr = "evaera/cmdr@1.12.0"
