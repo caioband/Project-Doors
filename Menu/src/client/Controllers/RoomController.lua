@@ -6,13 +6,15 @@ local Player = game.Players.LocalPlayer
 
 local LeaveRemoteFunction = ReplicatedStorage.Comms.Lobby:WaitForChild("LeaveRoom")
 local ChangeStatusFunction = ReplicatedStorage.Comms.Lobby:WaitForChild("ChangePlayerStatus")
+local GetRoomDataFunction = ReplicatedStorage.Comms.Lobby:WaitForChild("GetRoom")
+local StartGameFunction = ReplicatedStorage.Comms.Lobby:WaitForChild("StartGame")
 local JoinedRoomEvent = ReplicatedStorage.Comms.Lobby:WaitForChild("JoinedRoom")
 local LeftRoomEvent = ReplicatedStorage.Comms.Lobby:WaitForChild("LeftRoom")
-
-
 local StatusChangedEvent = ReplicatedStorage.Comms.Lobby:WaitForChild("PlayerStatusChanged")
+local StartGameEvent = ReplicatedStorage.Comms.Lobby:WaitForChild("GameStarted")
 
 
+local PlayersStatusCache = {}  
 
 local MenuController
 
@@ -47,6 +49,24 @@ local function CreateLocalDummyFromUserId(userId: number)
 	characterModel:PivotTo(CFrame.new(0, 5, 0))
 
 	return characterModel
+end
+
+local function dictSize(tbl)
+    local count = 0
+    for _, _ in pairs(tbl) do
+        count += 1
+    end
+    return count
+end
+
+local function getAllPlayersWithStatus(status)
+    local count = 0
+    for i,v in pairs(PlayersStatusCache) do
+        if v == status then
+            count += 1
+        end
+    end
+    return count
 end
 
 local function getPositionAvailable()
@@ -94,67 +114,152 @@ local function toggleTagStatus(characterModel, status)
     local tag = characterModel:FindFirstChild("Head"):FindFirstChild("Tag")
     if tag then
         local textLabel = tag:FindFirstChild("Ready")
+
         if textLabel then
-            textLabel.Text = status
-        end
-        if status == "Ready" then
-            textLabel.TextColor3 = Color3.fromRGB(0, 109, 16) 
-        else
-            textLabel.TextColor3 = Color3.fromRGB(109, 0, 0) 
+            if status == "Ready" then
+                textLabel.Text = "Ready"
+                textLabel.TextColor3 = Color3.fromRGB(0, 109, 16) 
+            else
+                textLabel.Text = "Not Ready"
+                textLabel.TextColor3 = Color3.fromRGB(109, 0, 0) 
+            end
         end
     end
+end
+
+function RoomController:UpdateStartButton()
+    local roomData = self:GetRoomData()
+    if roomData then
+        if roomData.ownerUserId == game.Players.LocalPlayer.UserId then
+            local RoomGui = PlayerGui:WaitForChild("Room")
+            local StartButton = RoomGui:FindFirstChild("Start", true)
+            if StartButton then
+                StartButton.Visible = true
+            end
+        end
+    end
+end
+
+function RoomController:GetRoomData()
+    local currentRoomId = Player:GetAttribute("CurrentRoomId")
+
+    if not currentRoomId then
+        return nil
+    end
+
+    local roomData = GetRoomDataFunction:InvokeServer(currentRoomId)
+
+    if roomData then
+        return roomData
+    else
+        warn("Failed to fetch room data for roomId:", currentRoomId)
+        return nil
+    end
+end
+
+function RoomController:IsRoomReady()
+    local readyStatusCount = getAllPlayersWithStatus("Ready")
+    local totalPlayers = dictSize(PlayersStatusCache)
+
+    if totalPlayers > 0 and readyStatusCount == totalPlayers then
+        return true
+    end
+
+    return false
+end
+
+function RoomController:StartGame()
+
 end
 
 function RoomController:ToggleStatus(UserId)
-
-    for i,v in pairs(workspace:FindFirstChild("PlayersInRoom"):GetChildren()) do
-        if v:GetAttribute("UserId") == UserId and v:IsA("Model") then
-            local currentStatus = v:GetAttribute("Status") or "NotReady"
-            local Tag = v:FindFirstChild("Head"):FindFirstChild("Tag")
-            local newStatus
-            if currentStatus == "NotReady" then
-                newStatus = "Ready"
-            else
-                newStatus = "NotReady"
-            end
-            v:SetAttribute("Status", newStatus)
-            toggleTagStatus(v, newStatus)
-
-            if v:GetAttribute("UserId") == Player.UserId then
-                local RoomGui = PlayerGui:WaitForChild("Room")
-                local ReadyButton = RoomGui:FindFirstChild("Ready", true)
-                if ReadyButton then
-                    if newStatus == "Ready" then
-                        ReadyButton.TextLabel.TextColor3 = Color3.fromRGB(0, 109, 16)
-                        ReadyButton.TextLabel.Text = "Ready"
-                    else
-                        ReadyButton.TextLabel.TextColor3 = Color3.fromRGB(109, 0, 0)
-                        ReadyButton.TextLabel.Text = "Not Ready"
-                    end
-                end
-            end
-            ChangeStatusFunction:InvokeServer({
-                userId = UserId,
-                roomId = Player:GetAttribute("CurrentRoomId"),
-                newStatus = newStatus
-            })
-        end
-    end
-end
-
-function RoomController:ObserveStatusChanges()
-    
-    self.statusChangedConnection = StatusChangedEvent.OnClientEvent:Connect(function(roomId, playerUserId, newStatus)
-        if Player:GetAttribute("CurrentRoomId") ~= roomId then
-            return
-        end
+    return Promise.new(function(resolve, reject)
         for i,v in pairs(workspace:FindFirstChild("PlayersInRoom"):GetChildren()) do
-            if v:GetAttribute("UserId") == playerUserId and v:IsA("Model") then
+            if v:GetAttribute("UserId") == UserId and v:IsA("Model") then
+                local currentStatus = v:GetAttribute("Status") or "NotReady"
+                local Tag = v:FindFirstChild("Head"):FindFirstChild("Tag")
+                local newStatus
+                if currentStatus == "NotReady" then
+                    newStatus = "Ready"
+                else
+                    newStatus = "NotReady"
+                end
                 v:SetAttribute("Status", newStatus)
                 toggleTagStatus(v, newStatus)
+
+                if v:GetAttribute("UserId") == Player.UserId then
+                    local RoomGui = PlayerGui:WaitForChild("Room")
+                    local ReadyButton = RoomGui:FindFirstChild("Ready", true)
+                    if ReadyButton then
+                        if newStatus == "Ready" then
+                            ReadyButton.TextLabel.TextColor3 = Color3.fromRGB(0, 109, 16)
+                            ReadyButton.TextLabel.Text = "Ready"
+                        else
+                            ReadyButton.TextLabel.TextColor3 = Color3.fromRGB(109, 0, 0)
+                            ReadyButton.TextLabel.Text = "Not Ready"
+                        end
+                    end
+                end
+                local response = ChangeStatusFunction:InvokeServer({
+                    userId = UserId,
+                    roomId = Player:GetAttribute("CurrentRoomId"),
+                    newStatus = newStatus
+                })
+
+                if response then
+                    PlayersStatusCache[UserId] = newStatus
+                    resolve()
+                else
+                    reject("Failed to change status on server")
+                end
             end
         end
     end)
+end
+
+function RoomController:ObserveStatusChanges()
+    if not self.statusChangedConnection then
+        self.statusChangedConnection = StatusChangedEvent.OnClientEvent:Connect(function(roomId, playerUserId, newStatus)
+            if Player:GetAttribute("CurrentRoomId") ~= roomId then
+                return
+            end
+
+            for i,v in pairs(workspace:FindFirstChild("PlayersInRoom"):GetChildren()) do
+                if v:GetAttribute("UserId") == playerUserId and v:IsA("Model") then
+                    v:SetAttribute("Status", newStatus)
+                    toggleTagStatus(v, newStatus)
+                    PlayersStatusCache[playerUserId] = newStatus
+                end
+            end
+
+            local readyCount = getAllPlayersWithStatus("Ready")
+            local isRoomReady = self:IsRoomReady()
+
+            if isRoomReady then
+                self:UpdateStartButton()
+            end
+        end)
+    end
+
+    if not self.startedGame then
+        self.startedGame = StartGameEvent.OnClientEvent:Connect(function(roomId)
+            local PlrGuiBlackList = {
+                "SharedGuis"
+            }
+
+            if Player:GetAttribute("CurrentRoomId") ~= roomId then
+                return
+            end
+
+            ToggleLoading:Toggle(true)
+
+            for i,v in pairs(PlayerGui:GetChildren()) do
+                if not table.find(PlrGuiBlackList, v.Name) and v:IsA("ScreenGui") then
+                    v.Enabled = false
+                end
+            end
+        end)
+    end
 end
 
 function RoomController:UpdateCharacters(playersIds)
@@ -162,6 +267,7 @@ function RoomController:UpdateCharacters(playersIds)
         if v:GetAttribute("UserId") and not table.find(playersIds, v:GetAttribute("UserId")) then
             local userId = v:GetAttribute("UserId")
             releasePositionForUserId(userId)
+            PlayersStatusCache[userId] = nil
             v:Destroy()
         end
     end
@@ -194,7 +300,11 @@ function RoomController:AddCharacter(userId)
     dummy:PivotTo(partPosition.CFrame)
     dummy:SetAttribute("UserId", userId)
     dummy:SetAttribute("Status", "NotReady")
+    toggleTagStatus(dummy, "NotReady")
+    PlayersStatusCache[userId] = "NotReady"
     tagClone.Parent = dummy:FindFirstChild("Head")
+    local username = game.Players:GetNameFromUserId(userId) or "Unknown"
+    tagClone.PlayerName.Text = "@"..username
     partPosition:SetAttribute("Occupied", true)
     partPosition:SetAttribute("UserId", userId)
 end
@@ -203,6 +313,7 @@ function RoomController:RemoveCharacter(userId)
     local character = getCharacterByUserId(userId)
 
     releasePositionForUserId(userId)
+    PlayersStatusCache[userId] = nil
 
     if character then
         character:Destroy()
@@ -251,6 +362,7 @@ function RoomController:ClearCharacters()
                 v:SetAttribute("UserId", nil)
             end
         end
+        PlayersStatusCache = {}
         resolve()
     end)
 end
@@ -266,6 +378,7 @@ function RoomController:RenderAndBindButtons(roomData)
     local RoomGui = PlayerGui:WaitForChild("Room")
     local LeaveOrDisband = RoomGui:FindFirstChild("LeaveOrDisband", true)
     local Ready = RoomGui:FindFirstChild("Ready", true)
+    local StartButton = RoomGui:FindFirstChild("Start", true)
     local IsOwner = roomData.ownerUserId == game.Players.LocalPlayer.UserId
 
     if IsOwner then
@@ -313,6 +426,11 @@ function RoomController:RenderAndBindButtons(roomData)
                     self.leftRoomConnection:Disconnect()
                     self.leftRoomConnection = nil
                 end
+
+                if self.startedGame then
+                    self.startedGame:Disconnect()
+                    self.startedGame = nil
+                end
             end
         end)
     end
@@ -323,21 +441,41 @@ function RoomController:RenderAndBindButtons(roomData)
         Ready.TextLabel.Text = "Not Ready"
         self.readyConnection = Ready.Activated:Connect(function()
             local RoomGui = PlayerGui:WaitForChild("Room")
-            self:ToggleStatus(game.Players.LocalPlayer.UserId)
+
+            ToggleLoading:Toggle(true)
+            self:ToggleStatus(game.Players.LocalPlayer.UserId):andThen(function()
+                local isRoomReady = self:IsRoomReady()
+
+                if isRoomReady then
+                    self:UpdateStartButton()
+                end
+                ToggleLoading:Toggle(false)
+            end)
         end)
     end
 
+    if StartButton then
+        StartButton.Activated:Once(function()
+            local roomData = self:GetRoomData()
+            if roomData and roomData.id == Player:GetAttribute("CurrentRoomId") then
+                local response = StartGameFunction:InvokeServer(roomData.id)
+
+                if not response then
+                    warn("Failed to start game on server")
+                end
+            end
+        end)
+    end        
 end
 
 function RoomController:LoadRoom(RoomData)
     return Promise.new(function(resolve, reject)
         Player:SetAttribute("CurrentRoomId", RoomData.id)
-        self:SetupCamera()
-        self:RenderAndBindButtons(RoomData)
-        print(RoomData.playerUserIds)
-        self:LoadCharacters(RoomData.playerUserIds)
         self:ObserveStatusChanges()
         self:ObserveRoomMembershipChanges()
+        self:SetupCamera()
+        self:RenderAndBindButtons(RoomData)
+        self:LoadCharacters(RoomData.playerUserIds)
         resolve()
     end)
 end

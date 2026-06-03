@@ -1,6 +1,13 @@
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TeleportService = game:GetService("TeleportService")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+local SharedModules = ServerScriptService:WaitForChild("Server"):WaitForChild("SharedModules")
+local SafeTeleport = require(SharedModules.SafeTeleport)
+
+local GAME_PLACE_ID = 134969655606525
 
 local DEFAULT_MAX_PLAYERS = 4
 local MIN_MAX_PLAYERS = 1
@@ -17,6 +24,8 @@ local CHANGE_PLAYER_STATUS_FUNCTION_NAME = "ChangePlayerStatus"
 local PLAYER_STATUS_CHANGED_EVENT_NAME = "PlayerStatusChanged"
 local JOINED_ROOM_EVENT_NAME = "JoinedRoom"
 local LEFT_ROOM_EVENT_NAME = "LeftRoom"
+local START_GAME_EVENT_NAME = "GameStarted"
+local START_GAME_FUNCTION_NAME = "StartGame"
 
 local LobbyService = {}
 
@@ -58,6 +67,20 @@ local function buildRoomSnapshot(room)
         createdAt = room.createdAt,
         updatedAt = room.updatedAt,
     }
+end
+
+local function convertUserIdTableToPlayerTable(userIds)
+    local players = {}
+
+    for _, userId in ipairs(userIds) do
+        local player = Players:GetPlayerByUserId(userId)
+
+        if player then
+            table.insert(players, player)
+        end
+    end
+
+    return players
 end
 
 local function getPlayersInRoom(room)
@@ -155,6 +178,14 @@ function LobbyService:SetupRemotes()
         changePlayerStatusFunction.Parent = lobbyFolder
     end
 
+    local startGameFunction = lobbyFolder:FindFirstChild(START_GAME_FUNCTION_NAME)
+
+    if not startGameFunction then
+        startGameFunction = Instance.new("RemoteFunction")
+        startGameFunction.Name = START_GAME_FUNCTION_NAME
+        startGameFunction.Parent = lobbyFolder
+    end
+
     local roomUpdatesEvent = lobbyFolder:FindFirstChild(ROOM_UPDATES_EVENT_NAME)
 
     if not roomUpdatesEvent then
@@ -185,6 +216,49 @@ function LobbyService:SetupRemotes()
         playerStatusChangedEvent = Instance.new("RemoteEvent")
         playerStatusChangedEvent.Name = PLAYER_STATUS_CHANGED_EVENT_NAME
         playerStatusChangedEvent.Parent = lobbyFolder
+    end
+
+    local startGameEvent = lobbyFolder:FindFirstChild(START_GAME_EVENT_NAME)
+
+    if not startGameEvent then
+        startGameEvent = Instance.new("RemoteEvent")
+        startGameEvent.Name = START_GAME_EVENT_NAME
+        startGameEvent.Parent = lobbyFolder
+    end
+
+    startGameFunction.OnServerInvoke = function(player, roomId)
+
+        local room = self.roomsById[roomId]
+        local playersInRoom = getPlayersInRoom(room)
+
+        if not room then
+            return false, string.format("Room %s was not found", tostring(roomId))
+        end
+
+        if player.UserId ~= room.ownerUserId then
+            return false, "Only the room owner can start the game"
+        end
+        
+        task.spawn(function()
+        	local success, result, err = pcall(function()
+        		return SafeTeleport:ReserveServerAndTeleport(GAME_PLACE_ID, playersInRoom)
+        	end)
+        
+        	if not success then
+        		warn("Teleport crashed:", tostring(result))
+        		return
+        	end
+        
+        	if result == false then
+        		warn("Teleport failed:", tostring(err))
+        		return
+        	end
+        
+        	print("Teleport started successfully:", result)
+        end)
+
+        self:BroadcastStartGame(roomId)
+        return true
     end
 
     changePlayerStatusFunction.OnServerInvoke = function(player, data)
@@ -284,6 +358,23 @@ function LobbyService:SetupRemotes()
     self.playerStatusChangedEvent = playerStatusChangedEvent
     self.joinedRoomEvent = joinedRoomEvent
     self.leftRoomEvent = leftRoomEvent
+    self.startGameEvent = startGameEvent
+end
+
+function LobbyService:BroadcastStartGame(roomId)
+    if not self.startGameEvent then
+        return
+    end
+
+    local room = self.roomsById[roomId]
+
+    if not room then
+        return
+    end
+
+    for _, roomPlayer in ipairs(getPlayersInRoom(room)) do
+        self.startGameEvent:FireClient(roomPlayer, roomId)
+    end
 end
 
 function LobbyService:BroadcastRoomUpdate(action, room)
