@@ -78,15 +78,14 @@ function ScenarioController:UpdateLogo()
 end
 
 function ScenarioController:StartRenderLoop()
-
-    if self.renderConnection then
-        self.renderConnection:Disconnect()
-    end
-
-    self.renderConnection = RunService.RenderStepped:Connect(function(deltaTime)
+    RunService:BindToRenderStep("ScenarioControllerRender", Enum.RenderPriority.Camera.Value, function(deltaTime)
         self:UpdateCamera(deltaTime)
         self:UpdateLogo()
     end)
+end
+
+function ScenarioController:StopRenderLoop()
+    RunService:UnbindFromRenderStep("ScenarioControllerRender")
 end
 
 function ScenarioController:Start()

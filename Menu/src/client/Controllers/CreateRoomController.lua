@@ -6,8 +6,10 @@ local PlayerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
 local SharedModules = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("SharedModules")
 
 local GuiObjectsUtils = require(SharedModules.GuiObjectsUtils)
+local ToggleLoading = require(SharedModules.ToggleLoading)
 
 local TextBoxConnections = {}
+local RoomController
 
 local CREATE_ROOM_FUNCTION_NAME = "CreateRoom" --- remote function 
 local ROOM_TYPES = {
@@ -177,6 +179,11 @@ function CreateRoomController:GetSelectedMaxPlayers()
     return MAX_PLAYERS_OPTIONS[self.selectedMaxPlayersIndex or 1]
 end
 
+function CreateRoomController:ToggleVisibility(isVisible)
+    local createRoomFrame = self:GetCreateRoomFrame()
+    createRoomFrame.Visible = isVisible
+end
+
 function CreateRoomController:ApplySelectedRoomType()
     local roomTypeLabel = self:GetRoomTypeWidgets()
     local roomType = self:GetSelectedRoomType()
@@ -230,12 +237,10 @@ function CreateRoomController:BindRoomTypeCarousel()
     local _, previousButton, nextButton = self:GetRoomTypeWidgets()
 
     previousButton.Activated:Connect(function()
-        print("Previous room type")
         self:RotateRoomType(-1)
     end)
 
     nextButton.Activated:Connect(function()
-        print("Next room type")
         self:RotateRoomType(1)
     end)
 
@@ -250,12 +255,10 @@ function CreateRoomController:BindMaxPlayersCarousel()
     local _, previousButton, nextButton = self:GetMaxPlayersWidgets()
 
     previousButton.Activated:Connect(function()
-        print("Previous max players")
         self:RotateMaxPlayers(-1)
     end)
 
     nextButton.Activated:Connect(function()
-        print("Next max players")
         self:RotateMaxPlayers(1)
     end)
 
@@ -354,7 +357,12 @@ function CreateRoomController:SubmitCreateRoom()
     notify("Create Room", notificationText)
     self:ResetForm()
     self:ClearTextBoxConnections()
-    self:ReturnToRoomOptions()
+    self:ToggleVisibility(false)
+    --self:ReturnToRoomOptions()
+
+    ToggleLoading:Toggle(true)
+    RoomController:LoadRoom(roomOrError):await()
+    ToggleLoading:Toggle(false)
 
     if LobbyController and LobbyController.roomUpdatesEvent and LobbyController:GetJoinRoomFrame().Visible then
         LobbyController:FetchAndRenderRooms()
@@ -371,7 +379,6 @@ function CreateRoomController:BindActionButtons()
 
     if backButton then
         backButton.Activated:Connect(function()
-            print("Back to room options")
             self:ResetForm()
             self:ReturnToRoomOptions()
         end)
@@ -379,7 +386,6 @@ function CreateRoomController:BindActionButtons()
 
     if createButton then
         createButton.Activated:Connect(function()
-            print("Submit create room form")
             self:SubmitCreateRoom()
         end)
     end
@@ -420,6 +426,7 @@ end
 function CreateRoomController:Start()
     LobbyController = self.GetController("LobbyController")
     RoomOptionsController = self.GetController("RoomOptionsController")
+    RoomController = self.GetController("RoomController")
     self.selectedRoomTypeIndex = 1
     self.selectedMaxPlayersIndex = 1
 end

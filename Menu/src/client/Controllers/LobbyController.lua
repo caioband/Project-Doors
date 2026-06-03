@@ -1,10 +1,17 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-
-local PlayerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
+local Player = Players.LocalPlayer
+local PlayerGui = Player:WaitForChild("PlayerGui")
 
 local LobbyController = {}
 local RoomOptionsController
+local RoomController
+local SharedModules = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("SharedModules")
+
+
+local ToggleLoading = require(SharedModules.ToggleLoading)
+
+local JoinButtonConnections = {}
 
 local function findFirstGuiObjectByName(instance, name)
     if instance.Name == name then
@@ -52,15 +59,39 @@ function LobbyController:GetRoomSlotTemplate()
 end
 
 function LobbyController:SetupRoomRemotes()
-    if self.roomUpdatesEvent and self.listRoomsFunction then
-        return
-    end
-
     local commsFolder = ReplicatedStorage:WaitForChild("Comms")
     local lobbyFolder = commsFolder:WaitForChild("Lobby")
+    
+    if not self.roomUpdatesEvent then
+        self.roomUpdatesEvent = lobbyFolder:WaitForChild("RoomUpdates")
+    end
 
-    self.listRoomsFunction = lobbyFolder:WaitForChild("ListRooms")
-    self.roomUpdatesEvent = lobbyFolder:WaitForChild("RoomUpdates")
+    if not self.listRoomsFunction then
+        self.listRoomsFunction = lobbyFolder:WaitForChild("ListRooms")
+    end
+
+    if not self.getRoomFunction then
+        self.getRoomFunction = lobbyFolder:WaitForChild("GetRoom")
+    end
+
+    if not self.joinRoomFunction then
+        self.joinRoomFunction = lobbyFolder:WaitForChild("JoinRoom")
+    end
+
+end
+
+function LobbyController:ClearJoinButtonConnections()
+    for button, connection in pairs(JoinButtonConnections) do
+        if connection then
+            connection:Disconnect()
+            JoinButtonConnections[button] = nil
+        end
+    end
+end
+
+function LobbyController:ToggleVisibility(isVisible)
+    local JoinRoom = PlayerGui:WaitForChild("Hud"):WaitForChild("JoinRoom")
+    JoinRoom.Visible = isVisible
 end
 
 function LobbyController:ClearRenderedRooms()
@@ -76,12 +107,33 @@ function LobbyController:ClearRenderedRooms()
 end
 
 function LobbyController:BindJoinButton(roomSlot, roomData)
-    local joinButton = findFirstGuiObjectByName(roomSlot, "Join")
+    local joinButton = findFirstGuiObjectByName(roomSlot, "JoinBtn")
 
     if joinButton and joinButton:IsA("GuiButton") and not joinButton:GetAttribute("IsBound") then
         joinButton:SetAttribute("IsBound", true)
-        joinButton.Activated:Connect(function()
-            warn(string.format("Join room flow not implemented yet for room %s", roomData.id))
+
+        JoinButtonConnections[joinButton] = joinButton.Activated:Connect(function()
+            local success, response, joinError = pcall(function()
+                local joinedRoom, errorMessage = self.joinRoomFunction:InvokeServer(roomData.id)
+                return joinedRoom, errorMessage
+            end)
+
+            if not success then
+                warn("JoinRoom invoke failed:", tostring(response))
+                return
+            end
+
+            if not response then
+                warn("JoinRoom failed:", tostring(joinError))
+                return
+            end
+
+            self:ToggleVisibility(false)
+            self:ClearJoinButtonConnections()
+
+            ToggleLoading:Toggle(true)
+            RoomController:LoadRoom(response):await()
+            ToggleLoading:Toggle(false)
         end)
     end
 end
@@ -103,7 +155,6 @@ function LobbyController:ApplyRoomDataToSlot(roomSlot, roomData)
         setTextIfPresent(roomSlot, { "AccessCode", "Code", "RoomCode" }, "PUBLIC")
     end
 
-    self:BindJoinButton(roomSlot, roomData)
 end
 
 function LobbyController:RenderRoom(roomData)
@@ -117,11 +168,15 @@ function LobbyController:RenderRoom(roomData)
 
     if not roomSlot then
         roomSlot = roomSlotTemplate:Clone()
-        roomSlot.Parent = roomSlotTemplate.Parent
+        roomSlot.Parent = roomSlotTemplate.Parent --    -"What", Joe Biden
         self.roomSlotsById[roomData.id] = roomSlot
     end
 
     self:ApplyRoomDataToSlot(roomSlot, roomData)
+end
+
+function LobbyController:GetRoomData(roomId)
+    return self.getRoomFunction:InvokeServer(roomId)
 end
 
 function LobbyController:RemoveRoom(roomId)
@@ -159,7 +214,14 @@ function LobbyController:ObserveRoomUpdates()
             return
         end
 
-        self:RenderRoom(roomData)
+        if action == "created" or action == "updated" then
+            self:RenderRoom(roomData)
+            
+            if Player:GetAttribute("CurrentRoomId") and Player:GetAttribute("CurrentRoomId") == roomData.id then
+                RoomController:UpdateCharacters(roomData.playerUserIds)
+            end
+            return
+        end
     end)
 end
 
@@ -185,10 +247,34 @@ function LobbyController:BindLobbyButtons()
         local RoomOptions = Hud:WaitForChild("RoomOptions")
         RoomOptions.Visible = true
         RoomOptionsController:BindOptionsButtons()
-    end)    
+    end)
+
+    JoinRoom.Frame.ScrollingFrame.DescendantAdded:Connect(function(descendant)
+        if descendant:IsA("GuiButton") and descendant.Name == "JoinBtn" then
+            local roomSlot = descendant:FindFirstAncestorWhichIsA("ImageLabel")
+            local roomId = roomSlot and roomSlot:GetAttribute("RoomId")
+            local roomData = roomId and self:GetRoomData(roomId)
+
+            if roomData then
+                self:BindJoinButton(roomSlot, roomData)
+            end
+        end
+    end)
+
+    JoinRoom.Frame.ScrollingFrame.DescendantRemoving:Connect(function(descendant)
+        if descendant:IsA("GuiButton") and descendant.Name == "JoinBtn" then
+            local connection = JoinButtonConnections[descendant]
+
+            if connection then
+                connection:Disconnect()
+                JoinButtonConnections[descendant] = nil
+            end
+        end
+    end)
 end
 
 function LobbyController:Start()
+    RoomController = self.GetController("RoomController")
     RoomOptionsController = self.GetController("RoomOptionsController")
     self.roomSlotsById = {}
 end

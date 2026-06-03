@@ -10,6 +10,13 @@ local LOBBY_COMMS_FOLDER_NAME = "Lobby"
 local CREATE_ROOM_FUNCTION_NAME = "CreateRoom"
 local LIST_ROOMS_FUNCTION_NAME = "ListRooms"
 local ROOM_UPDATES_EVENT_NAME = "RoomUpdates"
+local GET_ROOM_FUNCTION_NAME = "GetRoom"
+local LEAVE_ROOM_FUNCTION_NAME = "LeaveRoom"
+local JOIN_ROOM_FUNCTION_NAME = "JoinRoom"
+local CHANGE_PLAYER_STATUS_FUNCTION_NAME = "ChangePlayerStatus"
+local PLAYER_STATUS_CHANGED_EVENT_NAME = "PlayerStatusChanged"
+local JOINED_ROOM_EVENT_NAME = "JoinedRoom"
+local LEFT_ROOM_EVENT_NAME = "LeftRoom"
 
 local LobbyService = {}
 
@@ -51,6 +58,24 @@ local function buildRoomSnapshot(room)
         createdAt = room.createdAt,
         updatedAt = room.updatedAt,
     }
+end
+
+local function getPlayersInRoom(room)
+    local playersInRoom = {}
+
+    if not room then
+        return playersInRoom
+    end
+
+    for _, userId in ipairs(room.playerUserIds or {}) do
+        local player = Players:GetPlayerByUserId(userId)
+
+        if player then
+            table.insert(playersInRoom, player)
+        end
+    end
+
+    return playersInRoom
 end
 
 function LobbyService:Init()
@@ -98,12 +123,93 @@ function LobbyService:SetupRemotes()
         listRoomsFunction.Parent = lobbyFolder
     end
 
+    local getRoomFunction = lobbyFolder:FindFirstChild(GET_ROOM_FUNCTION_NAME)
+
+    if not getRoomFunction then
+        getRoomFunction = Instance.new("RemoteFunction")
+        getRoomFunction.Name = GET_ROOM_FUNCTION_NAME
+        getRoomFunction.Parent = lobbyFolder
+    end
+
+    local joinRoomFunction = lobbyFolder:FindFirstChild(JOIN_ROOM_FUNCTION_NAME)
+
+    if not joinRoomFunction then
+        joinRoomFunction = Instance.new("RemoteFunction")
+        joinRoomFunction.Name = JOIN_ROOM_FUNCTION_NAME
+        joinRoomFunction.Parent = lobbyFolder
+    end
+
+    local leaveRoomFunction = lobbyFolder:FindFirstChild(LEAVE_ROOM_FUNCTION_NAME)
+
+    if not leaveRoomFunction then
+        leaveRoomFunction = Instance.new("RemoteFunction")
+        leaveRoomFunction.Name = LEAVE_ROOM_FUNCTION_NAME
+        leaveRoomFunction.Parent = lobbyFolder
+    end
+
+    local changePlayerStatusFunction = lobbyFolder:FindFirstChild(CHANGE_PLAYER_STATUS_FUNCTION_NAME)
+
+    if not changePlayerStatusFunction then
+        changePlayerStatusFunction = Instance.new("RemoteFunction")
+        changePlayerStatusFunction.Name = CHANGE_PLAYER_STATUS_FUNCTION_NAME
+        changePlayerStatusFunction.Parent = lobbyFolder
+    end
+
     local roomUpdatesEvent = lobbyFolder:FindFirstChild(ROOM_UPDATES_EVENT_NAME)
 
     if not roomUpdatesEvent then
         roomUpdatesEvent = Instance.new("RemoteEvent")
         roomUpdatesEvent.Name = ROOM_UPDATES_EVENT_NAME
         roomUpdatesEvent.Parent = lobbyFolder
+    end
+
+    local joinedRoomEvent = lobbyFolder:FindFirstChild(JOINED_ROOM_EVENT_NAME)
+
+    if not joinedRoomEvent then
+        joinedRoomEvent = Instance.new("RemoteEvent")
+        joinedRoomEvent.Name = JOINED_ROOM_EVENT_NAME
+        joinedRoomEvent.Parent = lobbyFolder
+    end
+
+    local leftRoomEvent = lobbyFolder:FindFirstChild(LEFT_ROOM_EVENT_NAME)
+
+    if not leftRoomEvent then
+        leftRoomEvent = Instance.new("RemoteEvent")
+        leftRoomEvent.Name = LEFT_ROOM_EVENT_NAME
+        leftRoomEvent.Parent = lobbyFolder
+    end
+
+    local playerStatusChangedEvent = lobbyFolder:FindFirstChild(PLAYER_STATUS_CHANGED_EVENT_NAME)
+
+    if not playerStatusChangedEvent then
+        playerStatusChangedEvent = Instance.new("RemoteEvent")
+        playerStatusChangedEvent.Name = PLAYER_STATUS_CHANGED_EVENT_NAME
+        playerStatusChangedEvent.Parent = lobbyFolder
+    end
+
+    changePlayerStatusFunction.OnServerInvoke = function(player, data)
+        local roomId = data.roomId
+        local userId = data.userId
+        local newStatus = data.newStatus
+
+        local room = self.roomsById[roomId]
+
+        if not room then
+            return false, string.format("Room %s was not found", tostring(roomId))
+        end
+
+        if userId ~= player.UserId then
+            return false, "userId must match the invoking player's UserId"
+        end
+
+        if not table.find(room.playerUserIds, userId) then
+            return false, string.format("User %s is not in room %s", tostring(userId), tostring(roomId))
+        end
+
+        room.playerStatuses[userId] = newStatus
+        self:BroadcastPlayerStatusChange(roomId, userId, newStatus)
+
+        return true
     end
 
     createRoomFunction.OnServerInvoke = function(player, roomData)
@@ -125,8 +231,59 @@ function LobbyService:SetupRemotes()
     listRoomsFunction.OnServerInvoke = function(_, includePrivateRooms)
         return self:ListRooms(includePrivateRooms == true)
     end
-    print(roomUpdatesEvent)
+
+    getRoomFunction.OnServerInvoke = function(_, roomId)
+        return self:GetRoom(roomId)
+    end
+
+    joinRoomFunction.OnServerInvoke = function(player, roomId)
+        print("Player", player.Name, "is attempting to join room", roomId) -- debug
+
+        local room = self.roomsById[roomId]
+
+        if not room then
+            return false, string.format("Room %s was not found", tostring(roomId))
+        end
+
+        if room.isPrivate then
+            return false, "This room is private. Please enter the access code to join."
+        end
+
+        local success, roomOrError = self:AddPlayerToRoom(roomId, player.UserId)
+
+        if not success then
+            return false, tostring(roomOrError)
+        end
+
+        print("Player", player.Name, "joined room", roomId) -- debug
+        return roomOrError
+    end
+
+    leaveRoomFunction.OnServerInvoke = function(player, data)
+
+        local roomId = data.roomId
+        local userId = data.userId
+
+        local room = self.roomsById[roomId]
+
+        if roomId == nil or userId == nil then
+            return false, "roomId and userId are required"
+        end
+
+        if userId ~= player.UserId then
+            return false, "userId must match the invoking player's UserId"
+        end
+        if userId == room.ownerUserId then
+            return self:DeleteRoom(roomId)
+        end
+
+        return self:RemovePlayerFromRoom(roomId, userId)
+    end
+
     self.roomUpdatesEvent = roomUpdatesEvent
+    self.playerStatusChangedEvent = playerStatusChangedEvent
+    self.joinedRoomEvent = joinedRoomEvent
+    self.leftRoomEvent = leftRoomEvent
 end
 
 function LobbyService:BroadcastRoomUpdate(action, room)
@@ -134,6 +291,53 @@ function LobbyService:BroadcastRoomUpdate(action, room)
         return
     end
     self.roomUpdatesEvent:FireAllClients(action, buildRoomSnapshot(room))
+end
+
+function LobbyService:BroadcastJoinedRoom(playerUserId, room)
+    if not self.joinedRoomEvent then
+        return
+    end
+
+    local roomSnapshot = buildRoomSnapshot(room)
+
+    for _, roomPlayer in ipairs(getPlayersInRoom(room)) do
+        self.joinedRoomEvent:FireClient(roomPlayer, playerUserId, roomSnapshot)
+    end
+end
+
+function LobbyService:BroadcastLeftRoom(playerUserId, room)
+    if not self.leftRoomEvent then
+        return
+    end
+
+    local roomSnapshot = buildRoomSnapshot(room)
+
+    for _, roomPlayer in ipairs(getPlayersInRoom(room)) do
+        self.leftRoomEvent:FireClient(roomPlayer, playerUserId, roomSnapshot)
+    end
+end
+
+function LobbyService:BroadcastPlayerStatusChange(roomId, playerUserId, newStatus)
+    if not self.playerStatusChangedEvent then
+        return
+    end
+
+    local receivers = {}
+    local room = self.roomsById[roomId]
+    local playersIds = room and room.playerUserIds or {}
+
+    for i,v in pairs(playersIds) do
+        local player = Players:GetPlayerByUserId(v)
+        if player then
+            table.insert(receivers, player)
+        end
+    end
+    
+    for i,v in pairs(receivers) do
+        if v and v:IsA("Player") then
+            self.playerStatusChangedEvent:FireClient(v, roomId, playerUserId, newStatus)
+        end
+    end
 end
 
 function LobbyService:GenerateRoomId()
@@ -202,6 +406,77 @@ function LobbyService:ValidateCreateRoomPayload(owner, roomData)
     }
 end
 
+function LobbyService:GetRoom(roomId)
+    ensureServiceState(self)
+
+    local room = self.roomsById[roomId]
+
+    if not room then
+        return nil, string.format("Room %s was not found", tostring(roomId))
+    end
+
+    return buildRoomSnapshot(room)
+end
+
+function LobbyService:GetRoomByOwner(ownerUserId)
+    ensureServiceState(self)
+
+    local roomId = self.roomIdsByOwner[ownerUserId]
+
+    if not roomId then
+        return nil, string.format("Owner %s does not have a room", tostring(ownerUserId))
+    end
+
+    return self:GetRoom(roomId)
+end
+
+function LobbyService:RemovePlayerFromRoom(roomId, playerUserId)
+    ensureServiceState(self)
+
+    local room = self.roomsById[roomId]
+    if not room then
+        return false
+    end
+
+    for index, userId in ipairs(room.playerUserIds) do
+        if userId == playerUserId then
+            table.remove(room.playerUserIds, index)
+            room.playerStatuses[playerUserId] = nil
+            room.updatedAt = os.time()
+            self:BroadcastLeftRoom(playerUserId, room)
+            self:BroadcastRoomUpdate("updated", room)
+            return true
+        end
+    end
+
+    return false
+end
+
+function LobbyService:AddPlayerToRoom(roomId, playerUserId)
+    ensureServiceState(self)
+
+    local room = self.roomsById[roomId]
+
+    if not room then
+        return false, string.format("Room %s was not found", tostring(roomId))
+    end
+
+    if table.find(room.playerUserIds, playerUserId) then
+        return true, buildRoomSnapshot(room)
+    end
+
+    if #room.playerUserIds >= room.maxPlayers then
+        return false, "Room is full"
+    end
+
+    table.insert(room.playerUserIds, playerUserId)
+    room.playerStatuses[playerUserId] = room.playerStatuses[playerUserId] or "NotReady"
+    room.updatedAt = os.time()
+    self:BroadcastJoinedRoom(playerUserId, room)
+    self:BroadcastRoomUpdate("updated", room)
+    return true, buildRoomSnapshot(room)
+end
+
 function LobbyService:CreateRoom(owner, roomData)
     ensureServiceState(self)
 
@@ -223,6 +498,7 @@ function LobbyService:CreateRoom(owner, roomData)
         isPrivate = validatedRoomData.isPrivate,
         accessCode = validatedRoomData.accessCode,
         playerUserIds = { owner.UserId },
+        playerStatuses = { [owner.UserId] = "NotReady" },
         createdAt = now,
         updatedAt = now,
     }
@@ -339,6 +615,8 @@ function LobbyService:DeleteRoom(roomId)
         return nil, string.format("Room %s was not found", tostring(roomId))
     end
 
+    self:BroadcastLeftRoom(room.ownerUserId, room)
+
     self.roomsById[roomId] = nil
     self.roomIdsByOwner[room.ownerUserId] = nil
 
@@ -356,13 +634,9 @@ function LobbyService:HandlePlayerRemoving(player)
     end
 
     for _, room in pairs(self.roomsById) do
-        for index, userId in ipairs(room.playerUserIds) do
-            if userId == player.UserId then
-                table.remove(room.playerUserIds, index)
-                room.updatedAt = os.time()
-                self:BroadcastRoomUpdate("updated", room)
-                return
-            end
+        if table.find(room.playerUserIds, player.UserId) then
+            self:RemovePlayerFromRoom(room.id, player.UserId)
+            return
         end
     end
 end

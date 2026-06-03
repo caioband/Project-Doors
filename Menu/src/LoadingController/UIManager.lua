@@ -301,7 +301,7 @@ function LoadingScreen:LoadFinished()
         self:ClearDots()
         CreditsLoop(CreditsAndWarning, CurrentStep):await()
 		CurrentCamera.CFrame = workspace:WaitForChild("Cameras"):WaitForChild("Menu").CFrame
-		updateFOV(60)
+		CurrentCamera.FieldOfView = 60
 		ReplicatedFirst:SetAttribute("Loaded", true)
 		self:Disable()
     end)

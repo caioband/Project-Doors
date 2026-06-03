@@ -11,6 +11,7 @@ local HudFramesVisibilityCallbacks = require(script:WaitForChild("HudFramesVisib
 
 
 local RoomOptionsController 
+local ScenarioController
 
 local CurrentBlur
 
@@ -46,6 +47,7 @@ function MenuController:SetupPlayOptions()
 
     RoomOptions.Visible = true
     self:UnBindMenuButtons()
+    ScenarioController:StopRenderLoop()
     RoomOptionsController:BindOptionsButtons()
 end
 
@@ -68,7 +70,7 @@ function MenuController:BindMenuButtons()
             PlayButton:SetAttribute("IgnoreCallback", nil)
         end
 
-        ConnectionPlus:ConnectWithInfo(PlayButton,"Activated", PlayButton.Activated, function()
+        ConnectionPlus:ConnectWithInfo(PlayButton,"Activated", PlayButton.Activated, function() --- Idk why I created that sh*t of ConnectionPlus but it is useful for this case, I guess
             self:PlayButtonCallback()
         end)
 
@@ -84,6 +86,8 @@ function MenuController:BindMenuButtons()
             print("Credits Button Clicked")
         end)
     end
+
+    ScenarioController:StartRenderLoop()
 end
 
 function MenuController:UnBindMenuButtons()
@@ -142,6 +146,7 @@ function MenuController:Start()
     local Hud = PlayerGui:WaitForChild("Hud")
     
     RoomOptionsController = self.GetController("RoomOptionsController")
+    ScenarioController = self.GetController("ScenarioController")
 
     self:BindVisibilityForChildren(Hud)
     self:BindMenuButtons()
