@@ -13,6 +13,14 @@ local ToggleLoading = require(SharedModules.ToggleLoading)
 
 local JoinButtonConnections = {}
 
+local function disconnectConnection(connection)
+    if connection then
+        connection:Disconnect()
+    end
+
+    return nil
+end
+
 local function findFirstGuiObjectByName(instance, name)
     if instance.Name == name then
         return instance
@@ -92,6 +100,10 @@ end
 function LobbyController:ToggleVisibility(isVisible)
     local JoinRoom = PlayerGui:WaitForChild("Hud"):WaitForChild("JoinRoom")
     JoinRoom.Visible = isVisible
+
+    if not isVisible then
+        self:CleanupLobbyScreenConnections()
+    end
 end
 
 function LobbyController:ClearRenderedRooms()
@@ -155,6 +167,7 @@ function LobbyController:ApplyRoomDataToSlot(roomSlot, roomData)
         setTextIfPresent(roomSlot, { "AccessCode", "Code", "RoomCode" }, "PUBLIC")
     end
 
+    self:BindJoinButton(roomSlot, roomData)
 end
 
 function LobbyController:RenderRoom(roomData)
@@ -225,6 +238,14 @@ function LobbyController:ObserveRoomUpdates()
     end)
 end
 
+function LobbyController:CleanupLobbyScreenConnections()
+    self.roomUpdatesConnection = disconnectConnection(self.roomUpdatesConnection)
+    self.scrollingFrameAddedConnection = disconnectConnection(self.scrollingFrameAddedConnection)
+    self.scrollingFrameRemovingConnection = disconnectConnection(self.scrollingFrameRemovingConnection)
+    self.backButtonConnection = disconnectConnection(self.backButtonConnection)
+    self:ClearJoinButtonConnections()
+end
+
 function LobbyController:FetchAndRenderRooms()
     self:SetupRoomRemotes()
     self:ObserveRoomUpdates()
@@ -236,20 +257,22 @@ end
 
 function LobbyController:BindLobbyButtons()
     local JoinRoom = self:GetJoinRoomFrame()
+    local scrollingFrame = JoinRoom.Frame.ScrollingFrame
 
     local BackButton = JoinRoom:WaitForChild("Back")
 
+    self:CleanupLobbyScreenConnections()
     self:FetchAndRenderRooms()
 
-    BackButton.MouseButton1Click:Once(function()
-        JoinRoom.Visible = false
+    self.backButtonConnection = BackButton.MouseButton1Click:Once(function()
+        self:ToggleVisibility(false)
         local Hud = PlayerGui:WaitForChild("Hud")
         local RoomOptions = Hud:WaitForChild("RoomOptions")
         RoomOptions.Visible = true
         RoomOptionsController:BindOptionsButtons()
     end)
 
-    JoinRoom.Frame.ScrollingFrame.DescendantAdded:Connect(function(descendant)
+    self.scrollingFrameAddedConnection = scrollingFrame.DescendantAdded:Connect(function(descendant)
         if descendant:IsA("GuiButton") and descendant.Name == "JoinBtn" then
             local roomSlot = descendant:FindFirstAncestorWhichIsA("ImageLabel")
             local roomId = roomSlot and roomSlot:GetAttribute("RoomId")
@@ -261,7 +284,7 @@ function LobbyController:BindLobbyButtons()
         end
     end)
 
-    JoinRoom.Frame.ScrollingFrame.DescendantRemoving:Connect(function(descendant)
+    self.scrollingFrameRemovingConnection = scrollingFrame.DescendantRemoving:Connect(function(descendant)
         if descendant:IsA("GuiButton") and descendant.Name == "JoinBtn" then
             local connection = JoinButtonConnections[descendant]
 
@@ -277,6 +300,10 @@ function LobbyController:Start()
     RoomController = self.GetController("RoomController")
     RoomOptionsController = self.GetController("RoomOptionsController")
     self.roomSlotsById = {}
+    self.roomUpdatesConnection = nil
+    self.scrollingFrameAddedConnection = nil
+    self.scrollingFrameRemovingConnection = nil
+    self.backButtonConnection = nil
 end
 
 return LobbyController

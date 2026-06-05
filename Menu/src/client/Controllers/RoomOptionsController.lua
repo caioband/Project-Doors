@@ -33,6 +33,7 @@ function RoomOptionsController:BindOptionsButtons()
     bindButton(JoinRoomButton, "RoomOptionsBound", function()
             RoomOptions.Visible = false
             JoinRoom.Visible = true
+            print("Binding lobby buttons")
             LobbyController:BindLobbyButtons()
         end)
 

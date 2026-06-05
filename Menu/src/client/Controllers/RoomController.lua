@@ -303,7 +303,8 @@ function RoomController:AddCharacter(userId)
     toggleTagStatus(dummy, "NotReady")
     PlayersStatusCache[userId] = "NotReady"
     tagClone.Parent = dummy:FindFirstChild("Head")
-    local username = game.Players:GetNameFromUserId(userId) or "Unknown"
+    local player = game.Players:GetPlayerByUserId(userId)
+    local username = player and player.DisplayName or "Unknown"
     tagClone.PlayerName.Text = "@"..username
     partPosition:SetAttribute("Occupied", true)
     partPosition:SetAttribute("UserId", userId)
@@ -332,7 +333,7 @@ function RoomController:ObserveRoomMembershipChanges()
     end
 
     self.joinedRoomConnection = JoinedRoomEvent.OnClientEvent:Connect(function(playerUserId, roomData)
-        if not roomData or Player:GetAttribute("CurrentRoomId") ~= roomData.id then
+        if not (roomData or Player:GetAttribute("CurrentRoomId") ~= roomData.id) or playerUserId == game.Players.LocalPlayer.UserId then
             return
         end
 
@@ -340,7 +341,13 @@ function RoomController:ObserveRoomMembershipChanges()
     end)
 
     self.leftRoomConnection = LeftRoomEvent.OnClientEvent:Connect(function(playerUserId, roomData)
+        print("Player with userId", playerUserId, "left or was removed from room", roomData and roomData.id)
         if not roomData or Player:GetAttribute("CurrentRoomId") ~= roomData.id then
+            return
+        end
+
+        if roomData.isDisband then
+            self:ClearRoom()
             return
         end
 
@@ -374,7 +381,39 @@ function RoomController:SetupCamera()
     end
 end
 
+function RoomController:ClearConnections()
+    if self.statusChangedConnection then
+        self.statusChangedConnection:Disconnect()
+        self.statusChangedConnection = nil
+    end
+    if self.leaveOrDisbandConnection then
+        self.leaveOrDisbandConnection:Disconnect()
+        self.leaveOrDisbandConnection = nil
+    end
+    if self.readyConnection then
+        self.readyConnection:Disconnect()
+        self.readyConnection = nil
+    end
+    if self.startButtonConnection then
+        self.startButtonConnection:Disconnect()
+        self.startButtonConnection = nil
+    end
+    if self.joinedRoomConnection then
+        self.joinedRoomConnection:Disconnect()
+        self.joinedRoomConnection = nil
+    end
+    if self.leftRoomConnection then
+        self.leftRoomConnection:Disconnect()
+        self.leftRoomConnection = nil
+    end
+    if self.startedGame then
+        self.startedGame:Disconnect()
+        self.startedGame = nil
+    end
+end
+
 function RoomController:RenderAndBindButtons(roomData)
+    print("leak test")
     local RoomGui = PlayerGui:WaitForChild("Room")
     local LeaveOrDisband = RoomGui:FindFirstChild("LeaveOrDisband", true)
     local Ready = RoomGui:FindFirstChild("Ready", true)
@@ -392,45 +431,25 @@ function RoomController:RenderAndBindButtons(roomData)
     end
 
     if LeaveOrDisband then
-        LeaveOrDisband.Activated:Once(function()
+        if self.leaveOrDisbandConnection then
+            self.leaveOrDisbandConnection:Disconnect()
+        end
+
+        self.leaveOrDisbandConnection = LeaveOrDisband.Activated:Connect(function()
+            local currentConnection = self.leaveOrDisbandConnection
+
+            if currentConnection then
+                currentConnection:Disconnect()
+                self.leaveOrDisbandConnection = nil
+            end
+
             local Response = LeaveRemoteFunction:InvokeServer({
                 userId = game.Players.LocalPlayer.UserId,
                 roomId = roomData.id,
             })
             if Response then
-                workspace.CurrentCamera.CFrame = Cameras.Menu.CFrame
-                RoomGui.Frame.Visible = false
-                ToggleLoading:Toggle(true)
-                self:ClearCharacters():andThen(function()
-                    ToggleLoading:Toggle(false)
-                    MenuController:BindMenuButtons()
-                    Player:SetAttribute("CurrentRoomId", nil)
-                end)
-
-                if self.statusChangedConnection then
-                    self.statusChangedConnection:Disconnect()
-                    self.statusChangedConnection = nil
-                end
-
-                if self.readyConnection then
-                    self.readyConnection:Disconnect()
-                    self.readyConnection = nil
-                end
-
-                if self.joinedRoomConnection then
-                    self.joinedRoomConnection:Disconnect()
-                    self.joinedRoomConnection = nil
-                end
-
-                if self.leftRoomConnection then
-                    self.leftRoomConnection:Disconnect()
-                    self.leftRoomConnection = nil
-                end
-
-                if self.startedGame then
-                    self.startedGame:Disconnect()
-                    self.startedGame = nil
-                end
+                self:ClearRoom()
+                return
             end
         end)
     end
@@ -455,7 +474,18 @@ function RoomController:RenderAndBindButtons(roomData)
     end
 
     if StartButton then
-        StartButton.Activated:Once(function()
+        if self.startButtonConnection then
+            self.startButtonConnection:Disconnect()
+        end
+
+        self.startButtonConnection = StartButton.Activated:Connect(function()
+            local currentConnection = self.startButtonConnection
+
+            if currentConnection then
+                currentConnection:Disconnect()
+                self.startButtonConnection = nil
+            end
+
             local roomData = self:GetRoomData()
             if roomData and roomData.id == Player:GetAttribute("CurrentRoomId") then
                 local response = StartGameFunction:InvokeServer(roomData.id)
@@ -480,6 +510,18 @@ function RoomController:LoadRoom(RoomData)
     end)
 end
 
+function RoomController:ClearRoom()
+    workspace.CurrentCamera.CFrame = Cameras.Menu.CFrame
+    local RoomGui = PlayerGui:WaitForChild("Room")
+    RoomGui.Frame.Visible = false
+    ToggleLoading:Toggle(true)
+    self:ClearCharacters():andThen(function()
+        ToggleLoading:Toggle(false)
+        MenuController:BindMenuButtons()
+        Player:SetAttribute("CurrentRoomId", nil)
+        self:ClearConnections()
+    end)
+end
 
 
 function RoomController:Start()

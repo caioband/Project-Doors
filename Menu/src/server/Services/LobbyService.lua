@@ -66,6 +66,7 @@ local function buildRoomSnapshot(room)
         playerUserIds = cloneArray(room.playerUserIds),
         createdAt = room.createdAt,
         updatedAt = room.updatedAt,
+        isDisband = room.isDisband or false,
     }
 end
 
@@ -329,7 +330,6 @@ function LobbyService:SetupRemotes()
             return false, tostring(roomOrError)
         end
 
-        print("Player", player.Name, "joined room", roomId) -- debug
         return roomOrError
     end
 
@@ -701,12 +701,15 @@ end
 
 function LobbyService:DeleteRoom(roomId)
     local room = self.roomsById[roomId]
+    room["isDisband"] = true
 
     if not room then
         return nil, string.format("Room %s was not found", tostring(roomId))
     end
 
-    self:BroadcastLeftRoom(room.ownerUserId, room)
+    for _, playerUserId in ipairs(room.playerUserIds) do
+        self:BroadcastLeftRoom(playerUserId, room)
+    end
 
     self.roomsById[roomId] = nil
     self.roomIdsByOwner[room.ownerUserId] = nil
