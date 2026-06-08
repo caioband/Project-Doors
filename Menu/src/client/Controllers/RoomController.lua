@@ -13,14 +13,27 @@ local LeftRoomEvent = ReplicatedStorage.Comms.Lobby:WaitForChild("LeftRoom")
 local StatusChangedEvent = ReplicatedStorage.Comms.Lobby:WaitForChild("PlayerStatusChanged")
 local StartGameEvent = ReplicatedStorage.Comms.Lobby:WaitForChild("GameStarted")
 
+local ChooseComponent = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("SharedModules"):WaitForChild("ChooseComponent"))
+local ToggleLoading = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("SharedModules"):WaitForChild("ToggleLoading"))
+local Promise = require(ReplicatedStorage:WaitForChild("ExternalPackages"):WaitForChild("promise"))
 
 local PlayersStatusCache = {}  
 
 local MenuController
 
-local ToggleLoading = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("SharedModules"):WaitForChild("ToggleLoading"))
+local InviteButtonsConnections = {}
+local KickButtonsConnections = {}
 
-local Promise = require(ReplicatedStorage:WaitForChild("ExternalPackages"):WaitForChild("promise"))
+
+type ChooseComponentData = {
+    type: string,
+    delay: number?,
+    content: string,
+    confirmText: string?,
+    cancelText: string?,
+    confirmCallback: (() -> ())?,
+    cancelCallback: (() -> ())?,
+}
 
 local function CreateLocalDummyFromUserId(userId: number)
 	local success, characterModel = pcall(function()
@@ -51,12 +64,62 @@ local function CreateLocalDummyFromUserId(userId: number)
 	return characterModel
 end
 
+local function alert(data: ChooseComponentData)
+    ChooseComponent:Show(data)
+end
+
 local function dictSize(tbl)
     local count = 0
     for _, _ in pairs(tbl) do
         count += 1
     end
     return count
+end
+
+local function Kick(part)
+
+    local function requestServer(userId)
+        return Promise.new(function(resolve, reject)
+            local response, responseMessage = LeaveRemoteFunction:InvokeServer({
+                userId = userId,
+                roomId = Player:GetAttribute("CurrentRoomId"),
+                isKick = true,
+            })  
+            print("Kick response:", response, responseMessage)
+            if response then
+                resolve()
+            else
+                reject("Failed to kick user with userId: "..tostring(userId))
+            end
+        end)
+    end
+
+    local userId = part:GetAttribute("UserId")
+        if userId then
+            alert({
+                type = "Center",
+                content = "Are you sure you want to kick this player?",
+                confirmText = "Kick",
+                cancelText = "Cancel",
+                confirmCallback = function()
+                   task.spawn(function()
+                        ToggleLoading:Toggle(true)
+                        local Response, Error = requestServer(userId):await()
+                        if not Response then
+                            warn(Error)
+                             alert({
+                                 type = "Center",
+                                 content = "An error occurred while trying to kick the player",
+                                 confirmText = "OK",
+                             })
+                        end
+                        ToggleLoading:Toggle(false)
+                    end)
+                end, 
+            })
+        else
+            warn("No UserId found for part:", part.Name)
+        end
 end
 
 local function getAllPlayersWithStatus(status)
@@ -106,6 +169,23 @@ local function releasePositionForUserId(userId)
         if instance:IsA("Part") and instance:GetAttribute("UserId") == userId then
             instance:SetAttribute("Occupied", false)
             instance:SetAttribute("UserId", nil)
+            local InviteButton = instance:FindFirstChild("Invite", true)
+
+            if InviteButton and not InviteButtonsConnections[InviteButton] then
+                InviteButton.Visible = true
+                InviteButtonsConnections[InviteButton] = InviteButton.Activated:Connect(function()
+                    print("invite panel")
+                end)
+            end
+
+            local KickButton = instance:FindFirstChild("Kick", true)
+            if KickButton then
+                KickButton.Visible = false
+                if KickButtonsConnections[KickButton] then
+                    KickButtonsConnections[KickButton]:Disconnect()
+                    KickButtonsConnections[KickButton] = nil
+                end
+            end
         end
     end
 end
@@ -237,6 +317,12 @@ function RoomController:ObserveStatusChanges()
 
             if isRoomReady then
                 self:UpdateStartButton()
+            else 
+                local RoomGui = PlayerGui:WaitForChild("Room")
+                local StartButton = RoomGui:FindFirstChild("Start", true)
+                if StartButton then
+                    StartButton.Visible = false
+                end
             end
         end)
     end
@@ -279,7 +365,17 @@ function RoomController:AddCharacter(userId)
     end
 
     local success, dummyOrError = pcall(CreateLocalDummyFromUserId, userId)
+    local GetRoom = GetRoomDataFunction:InvokeServer(Player:GetAttribute("CurrentRoomId"))
 
+     if not GetRoom then
+        warn("Failed to fetch room data for roomId:", Player:GetAttribute("CurrentRoomId"))
+        return
+    end
+
+     if not success or not dummyOrError then
+        warn("Failed to create dummy for userId:", dummyOrError)
+        return
+    end
     if not success or not dummyOrError then
         warn("Failed to create dummy for userId:", dummyOrError)
         return
@@ -308,6 +404,26 @@ function RoomController:AddCharacter(userId)
     tagClone.PlayerName.Text = "@"..username
     partPosition:SetAttribute("Occupied", true)
     partPosition:SetAttribute("UserId", userId)
+    local InviteButton = partPosition:FindFirstChild("Invite", true)
+    local KickButton = partPosition:FindFirstChild("Kick", true)
+
+    if GetRoom then
+        if KickButton and userId ~= game.Players.LocalPlayer.UserId and GetRoom.ownerUserId == game.Players.LocalPlayer.UserId then
+            KickButton.Visible = true
+            if not KickButtonsConnections[KickButton] then
+                KickButtonsConnections[KickButton] = KickButton.Activated:Connect(function()
+                    Kick(partPosition)
+                end)
+            end
+        end   
+    end
+    if InviteButton then
+        InviteButton.Visible = false
+        if InviteButtonsConnections[InviteButton] then
+            InviteButtonsConnections[InviteButton]:Disconnect()
+            InviteButtonsConnections[InviteButton] = nil
+        end
+    end
 end
 
 function RoomController:RemoveCharacter(userId)
@@ -341,7 +457,21 @@ function RoomController:ObserveRoomMembershipChanges()
     end)
 
     self.leftRoomConnection = LeftRoomEvent.OnClientEvent:Connect(function(playerUserId, roomData)
-        print("Player with userId", playerUserId, "left or was removed from room", roomData and roomData.id)
+        print(roomData)
+        if roomData.isKick then
+            if playerUserId == game.Players.LocalPlayer.UserId then
+                alert({
+                    type = "Center",
+                    content = "You have been kicked from the room.",
+                    confirmText = "OK",
+                    confirmCallback = function()
+                         self:ClearRoom()
+                    end
+                })
+            end
+            return
+        end
+
         if not roomData or Player:GetAttribute("CurrentRoomId") ~= roomData.id then
             return
         end
@@ -365,8 +495,22 @@ function RoomController:ClearCharacters()
                 v:SetAttribute("Occupied", false)
             end
             if v:IsA("Part") then
+                local KickButton = v:FindFirstChild("Kick", true)
+                local InviteButton = v:FindFirstChild("Invite", true)
                 v:SetAttribute("Occupied", false)
                 v:SetAttribute("UserId", nil)
+                if KickButton and KickButtonsConnections[KickButton] then
+                     KickButtonsConnections[KickButton]:Disconnect()
+                     KickButtonsConnections[KickButton] = nil
+                end
+                if InviteButton and InviteButtonsConnections[InviteButton] then
+                    InviteButtonsConnections[InviteButton]:Disconnect()
+                    InviteButtonsConnections[InviteButton] = nil
+                end
+
+                if KickButton then
+                    KickButton.Visible = false
+                end
             end
         end
         PlayersStatusCache = {}
@@ -416,9 +560,22 @@ function RoomController:RenderAndBindButtons(roomData)
     print("leak test")
     local RoomGui = PlayerGui:WaitForChild("Room")
     local LeaveOrDisband = RoomGui:FindFirstChild("LeaveOrDisband", true)
+    local CharactersFolder = workspace:FindFirstChild("PlayersInRoom")
     local Ready = RoomGui:FindFirstChild("Ready", true)
     local StartButton = RoomGui:FindFirstChild("Start", true)
     local IsOwner = roomData.ownerUserId == game.Players.LocalPlayer.UserId
+    StartButton.Visible = false
+
+    local function Start()
+        return Promise.new(function(resolve, reject)
+            local response, dataOrError = StartGameFunction:InvokeServer(roomData.id)
+            if response then
+                resolve()
+            else
+                reject("Failed to start game on server")
+            end
+        end)
+    end
 
     if IsOwner then
         if LeaveOrDisband then
@@ -480,22 +637,40 @@ function RoomController:RenderAndBindButtons(roomData)
 
         self.startButtonConnection = StartButton.Activated:Connect(function()
             local currentConnection = self.startButtonConnection
-
-            if currentConnection then
-                currentConnection:Disconnect()
-                self.startButtonConnection = nil
-            end
-
             local roomData = self:GetRoomData()
             if roomData and roomData.id == Player:GetAttribute("CurrentRoomId") then
-                local response = StartGameFunction:InvokeServer(roomData.id)
+                ToggleLoading:Toggle(true)
+                local Response, Error = Start():await()
+                ToggleLoading:Toggle(false)
 
-                if not response then
-                    warn("Failed to start game on server")
+                if not Response then
+                    alert({
+                        type = "Center",
+                        content = Error,
+                    })
+                    return
                 end
+
+                if currentConnection then
+                    currentConnection:Disconnect()
+                    self.startButtonConnection = nil
+                end
+                StartButton.Visible = false
             end
         end)
-    end        
+    end
+    
+    for i,v in pairs(CharactersFolder:GetDescendants()) do
+        if v.Name == "Invite" then
+            InviteButtonsConnections[v] = v.Activated:Connect(function()
+                print("invite panel")
+            end)
+        elseif v.Name == "Kick" then
+            KickButtonsConnections[v] = v.Activated:Connect(function()
+                Kick(v.Parent)
+            end)
+        end
+    end
 end
 
 function RoomController:LoadRoom(RoomData)

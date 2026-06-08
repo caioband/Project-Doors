@@ -240,23 +240,21 @@ function LobbyService:SetupRemotes()
             return false, "Only the room owner can start the game"
         end
         
-        task.spawn(function()
-        	local success, result, err = pcall(function()
-        		return SafeTeleport:ReserveServerAndTeleport(GAME_PLACE_ID, playersInRoom)
-        	end)
-        
-        	if not success then
-        		warn("Teleport crashed:", tostring(result))
-        		return
-        	end
-        
-        	if result == false then
-        		warn("Teleport failed:", tostring(err))
-        		return
-        	end
-        
-        	print("Teleport started successfully:", result)
+        local success, result, err = pcall(function()
+        	return SafeTeleport:ReserveServerAndTeleport(GAME_PLACE_ID, playersInRoom)
         end)
+        
+        if not success then
+        	warn("Teleport crashed:", tostring(result))
+        	return false
+        end
+        
+        if result == false then
+        	warn("Teleport failed:", tostring(err))
+        	return false
+        end
+        
+        print("Teleport started successfully:", result)
 
         self:BroadcastStartGame(roomId)
         return true
@@ -345,13 +343,21 @@ function LobbyService:SetupRemotes()
         end
 
         if userId ~= player.UserId then
-            return false, "userId must match the invoking player's UserId"
+            if data.isKick then
+                if room.ownerUserId ~= player.UserId then
+                    return false, "Only the room owner can kick players"
+                end
+                self:BroadcastKickPlayer(userId)
+            else
+                return false, "userId must match the invoking player's UserId"
+            end
         end
+
         if userId == room.ownerUserId then
             return self:DeleteRoom(roomId)
         end
 
-        return self:RemovePlayerFromRoom(roomId, userId)
+        return true, self:RemovePlayerFromRoom(roomId, userId)
     end
 
     self.roomUpdatesEvent = roomUpdatesEvent
@@ -394,6 +400,16 @@ function LobbyService:BroadcastJoinedRoom(playerUserId, room)
     for _, roomPlayer in ipairs(getPlayersInRoom(room)) do
         self.joinedRoomEvent:FireClient(roomPlayer, playerUserId, roomSnapshot)
     end
+end
+
+function LobbyService:BroadcastKickPlayer(playerUserId)
+    if not self.leftRoomEvent then
+        return
+    end
+    local targetPlayer = Players:GetPlayerByUserId(playerUserId)
+    self.leftRoomEvent:FireClient(targetPlayer, playerUserId, {
+        isKick = true,
+    })
 end
 
 function LobbyService:BroadcastLeftRoom(playerUserId, room)
