@@ -1,7 +1,7 @@
 local ContentProvider = game:GetService("ContentProvider")
 
-local LoadingController = {}
-LoadingController.__index = LoadingController
+local Preloader = {}
+Preloader.__index = Preloader
 
 local TYPE_ORDER = {
 	"Images",
@@ -56,7 +56,7 @@ local function classifyAsset(asset)
 	return "Instances"
 end
 
-function LoadingController.new()
+function Preloader.new()
 	local preloadStartedEvent = Instance.new("BindableEvent")
 	local preloadFinishedEvent = Instance.new("BindableEvent")
 	local sectionStartedEvent = Instance.new("BindableEvent")
@@ -74,10 +74,10 @@ function LoadingController.new()
 		SectionStarted = sectionStartedEvent.Event,
 		_SectionAssetLoadedEvent = sectionAssetLoadedEvent,
 		SectionAssetLoaded = sectionAssetLoadedEvent.Event,
-	}, LoadingController)
+	}, Preloader)
 end
 
-function LoadingController:SetAssetsToPreload(assets)
+function Preloader:SetAssetsToPreload(assets)
 	self.AssetsToPreload = {}
 
 	if assets == nil then
@@ -95,7 +95,7 @@ function LoadingController:SetAssetsToPreload(assets)
 	return self.AssetsToPreload
 end
 
-function LoadingController:AddAssetsToPreload(assets)
+function Preloader:AddAssetsToPreload(assets)
 	if assets == nil then
 		return self.AssetsToPreload
 	end
@@ -111,19 +111,19 @@ function LoadingController:AddAssetsToPreload(assets)
 	return self.AssetsToPreload
 end
 
-function LoadingController:_onPreloadStarted(totalAssets)
+function Preloader:_onPreloadStarted(totalAssets)
 	if self._PreloadStartedEvent then
 		self._PreloadStartedEvent:Fire(totalAssets)
 	end
 end
 
-function LoadingController:_onPreloadFinished(totalAssets)
+function Preloader:_onPreloadFinished(totalAssets)
 	if self._PreloadFinishedEvent then
 		self._PreloadFinishedEvent:Fire(totalAssets)
 	end
 end
 
-function LoadingController:BuildAssetSections()
+function Preloader:BuildAssetSections()
 	local assetsByType = {}
 	local assetSections = {}
 
@@ -152,13 +152,13 @@ function LoadingController:BuildAssetSections()
 	return assetSections
 	end
 
-function LoadingController:_onSectionStart(section, sectionIndex, sectionCount)
+function Preloader:_onSectionStart(section, sectionIndex, sectionCount)
 	if self._SectionStartedEvent then
 		self._SectionStartedEvent:Fire(section.Type, section.Assets, sectionIndex, sectionCount)
 	end
 end
 
-function LoadingController:_onSectionAssetLoaded(section, sectionIndex, sectionCount, assetIndex, sectionAssetCount, assetId, assetFetchStatus)
+function Preloader:_onSectionAssetLoaded(section, sectionIndex, sectionCount, assetIndex, sectionAssetCount, assetId, assetFetchStatus)
 	if self._SectionAssetLoadedEvent then
 		self._SectionAssetLoadedEvent:Fire(
 			section.Type,
@@ -172,7 +172,7 @@ function LoadingController:_onSectionAssetLoaded(section, sectionIndex, sectionC
 	end
 end
 
-function LoadingController:Destroy()
+function Preloader:Destroy()
 	if self._PreloadStartedEvent then
 		self._PreloadStartedEvent:Destroy()
 		self._PreloadStartedEvent = nil
@@ -198,7 +198,7 @@ function LoadingController:Destroy()
 	end
 end
 
-function LoadingController:PreloadAssets()
+function Preloader:PreloadAssets()
 	if #self.AssetsToPreload == 0 then
 		return
 	end
@@ -235,7 +235,7 @@ end
 
 
 
-function LoadingController:Start()
+function Preloader:Start()
 
 	self:PreloadAssets()
 
@@ -247,4 +247,4 @@ function LoadingController:Start()
 	self:_onPreloadFinished(#self.AssetsToPreload)
 end
 
-return LoadingController
+return Preloader

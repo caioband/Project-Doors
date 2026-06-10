@@ -1,0 +1,45 @@
+{
+  "name": "ProjectDoors",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "ExternalPackages": {
+        "$path": "../Packages"
+      },
+      "Shared": {
+        "$path": "src/ReplicatedStorage",
+        "SharedModules": {
+          "$path": "../SharedModules"
+        }
+      }
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "Server": {
+        "$path": "src/server",
+        "SharedModules":{
+          "$path": "../SharedModulesServer"
+        }
+      }
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "Client": {
+          "$path": "src/client"
+        }
+      }
+    },
+    "ReplicatedFirst": {
+      "$className": "ReplicatedFirst",
+      "LoadingController": {
+        "$path": "src/LoadingController"
+      },
+      "SharedModulesFirst": {
+        "$path": "../SharedModulesFirst"
+      }
+    }
+  }
+}
