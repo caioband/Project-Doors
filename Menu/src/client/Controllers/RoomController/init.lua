@@ -14,6 +14,7 @@ local StatusChangedEvent = ReplicatedStorage.Comms.Lobby:WaitForChild("PlayerSta
 local StartGameEvent = ReplicatedStorage.Comms.Lobby:WaitForChild("GameStarted")
 
 local ChooseComponent = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("SharedModules"):WaitForChild("ChooseComponent"))
+local PlayerListComponent = require(script:WaitForChild("PlayersListComponent"))
 local ToggleLoading = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("SharedModules"):WaitForChild("ToggleLoading"))
 local Promise = require(ReplicatedStorage:WaitForChild("ExternalPackages"):WaitForChild("promise"))
 
@@ -174,6 +175,7 @@ local function releasePositionForUserId(userId)
             if InviteButton and not InviteButtonsConnections[InviteButton] then
                 InviteButton.Visible = true
                 InviteButtonsConnections[InviteButton] = InviteButton.Activated:Connect(function()
+                    PlayerListComponent:Render()
                     print("invite panel")
                 end)
             end
@@ -662,12 +664,14 @@ function RoomController:RenderAndBindButtons(roomData)
     
     for i,v in pairs(CharactersFolder:GetDescendants()) do
         if v.Name == "Invite" then
+            v.Visible = true
             InviteButtonsConnections[v] = v.Activated:Connect(function()
+                PlayerListComponent:Render()
                 print("invite panel")
             end)
         elseif v.Name == "Kick" then
             KickButtonsConnections[v] = v.Activated:Connect(function()
-                Kick(v.Parent)
+                Kick(v.Parent.Parent.Parent)
             end)
         end
     end

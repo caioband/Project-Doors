@@ -26,8 +26,15 @@ local JOINED_ROOM_EVENT_NAME = "JoinedRoom"
 local LEFT_ROOM_EVENT_NAME = "LeftRoom"
 local START_GAME_EVENT_NAME = "GameStarted"
 local START_GAME_FUNCTION_NAME = "StartGame"
+local GET_PLAYERS_BUSY_FUNCTION_NAME = "GetPlayersBusy"
+local INVITE_PLAYER_FUNCTION_NAME = "InvitePlayer"
+local PLAYER_INVITED_EVENT_NAME = "PlayerInvited"
+local ACCEPT_INVITE_FUNCTION_NAME = "AcceptInvite"
 
 local LobbyService = {}
+
+local Invites = {}
+
 
 local function ensureServiceState(self)
     if not self.roomsById then
@@ -155,6 +162,14 @@ function LobbyService:SetupRemotes()
         getRoomFunction.Parent = lobbyFolder
     end
 
+    local getPlayersBusyFunction = lobbyFolder:FindFirstChild(GET_PLAYERS_BUSY_FUNCTION_NAME)
+
+    if not getPlayersBusyFunction then
+        getPlayersBusyFunction = Instance.new("RemoteFunction")
+        getPlayersBusyFunction.Name = GET_PLAYERS_BUSY_FUNCTION_NAME
+        getPlayersBusyFunction.Parent = lobbyFolder
+    end
+
     local joinRoomFunction = lobbyFolder:FindFirstChild(JOIN_ROOM_FUNCTION_NAME)
 
     if not joinRoomFunction then
@@ -177,6 +192,30 @@ function LobbyService:SetupRemotes()
         changePlayerStatusFunction = Instance.new("RemoteFunction")
         changePlayerStatusFunction.Name = CHANGE_PLAYER_STATUS_FUNCTION_NAME
         changePlayerStatusFunction.Parent = lobbyFolder
+    end
+
+    local invitePlayerFunction = lobbyFolder:FindFirstChild(INVITE_PLAYER_FUNCTION_NAME)
+
+    if not invitePlayerFunction then
+        invitePlayerFunction = Instance.new("RemoteFunction")
+        invitePlayerFunction.Name = INVITE_PLAYER_FUNCTION_NAME
+        invitePlayerFunction.Parent = lobbyFolder
+    end
+
+    local playerInvitedEvent = lobbyFolder:FindFirstChild(PLAYER_INVITED_EVENT_NAME)
+
+    if not playerInvitedEvent then
+        playerInvitedEvent = Instance.new("RemoteEvent")
+        playerInvitedEvent.Name = PLAYER_INVITED_EVENT_NAME
+        playerInvitedEvent.Parent = lobbyFolder
+    end
+
+    local acceptInviteFunction = lobbyFolder:FindFirstChild(ACCEPT_INVITE_FUNCTION_NAME)
+
+    if not acceptInviteFunction then
+        acceptInviteFunction = Instance.new("RemoteFunction")
+        acceptInviteFunction.Name = ACCEPT_INVITE_FUNCTION_NAME
+        acceptInviteFunction.Parent = lobbyFolder
     end
 
     local startGameFunction = lobbyFolder:FindFirstChild(START_GAME_FUNCTION_NAME)
@@ -285,6 +324,71 @@ function LobbyService:SetupRemotes()
         return true
     end
 
+    invitePlayerFunction.OnServerInvoke = function(player, targetUserId)
+    	local roomId = self:GetPlayerRoomId(player.UserId)
+    	if not roomId then
+    		return false, "Player is not in a room"
+    	end
+
+    	local room = self.roomsById[roomId]
+    	if not room then
+    		return false, "Room not found"
+    	end
+
+    	local targetPlayer = Players:GetPlayerByUserId(targetUserId)
+    	if not targetPlayer then
+    		return false, "Target player not found"
+    	end
+
+    	local invite = self:GenerateInvite(player, targetPlayer)
+    	if not invite then
+    		return false, "Failed to generate invite"
+    	end
+
+        local inviteData = {
+            id = invite.id,
+            inviterUserId = invite.inviterUserId,
+            inviterName = player.Name,
+            inviteeUserId = invite.inviteeUserId,
+            expiresAt = invite.expiresAt,
+            roomId = roomId,
+        }
+
+        Invites[invite.id] = inviteData
+
+    	playerInvitedEvent:FireClient(targetPlayer, inviteData)
+
+    	return true
+    end
+
+    acceptInviteFunction.OnServerInvoke = function(player, inviteId)
+
+    	local invite = Invites[inviteId]
+    	if not invite then
+    		return false, "Invite not found or expired"
+    	end
+
+    	if invite.inviteeUserId ~= player.UserId then
+    		return false, "This invite is not for the invoking player"
+    	end
+
+    	local roomId = invite.roomId
+    	local room = self.roomsById[roomId]
+    	if not room then
+    		return false, "Room not found"
+    	end
+
+    	local success, result = self:AddPlayerToRoom(roomId, player.UserId)
+
+    	if not success then
+    		return false, tostring(result)
+    	end
+
+    	Invites[inviteId] = nil
+
+    	return true
+    end
+
     createRoomFunction.OnServerInvoke = function(player, roomData)
         local success, roomOrError, createError = pcall(function()
             return self:CreateRoom(player, roomData)
@@ -305,11 +409,31 @@ function LobbyService:SetupRemotes()
         return self:ListRooms(includePrivateRooms == true)
     end
 
+    getPlayersBusyFunction.OnServerInvoke = function(_, playerUserIds)
+        local busyStatuses = {}
+
+        local players = Players:GetPlayers()
+
+        for _, player in ipairs(players) do
+            local userId = player.UserId
+            busyStatuses[userId] = false
+
+            for _, room in pairs(self.roomsById) do
+                if table.find(room.playerUserIds, userId) then
+                    busyStatuses[userId] = true
+                    break
+                end
+            end
+        end
+
+        return busyStatuses
+    end
+
     getRoomFunction.OnServerInvoke = function(_, roomId)
         return self:GetRoom(roomId)
     end
 
-    joinRoomFunction.OnServerInvoke = function(player, roomId)
+    joinRoomFunction.OnServerInvoke = function(player, roomId, invite)
         print("Player", player.Name, "is attempting to join room", roomId) -- debug
 
         local room = self.roomsById[roomId]
@@ -318,8 +442,26 @@ function LobbyService:SetupRemotes()
             return false, string.format("Room %s was not found", tostring(roomId))
         end
 
-        if room.isPrivate then
-            return false, "This room is private. Please enter the access code to join."
+        if room.isPrivate and not invite then
+            return false, "This room is private."
+        end
+
+        if invite then
+            local inviteData = Invites[invite.id]
+
+            if not inviteData then
+                return false, "Invite not found or expired"
+            end
+
+            if inviteData.inviteeUserId ~= player.UserId then
+                return false, "This invite is not for the invoking player"
+            end
+
+            if inviteData.roomId ~= roomId then
+                return false, "This invite is not for the specified room"
+            end
+
+            Invites[invite.id] = nil
         end
 
         local success, roomOrError = self:AddPlayerToRoom(roomId, player.UserId)
@@ -365,6 +507,20 @@ function LobbyService:SetupRemotes()
     self.joinedRoomEvent = joinedRoomEvent
     self.leftRoomEvent = leftRoomEvent
     self.startGameEvent = startGameEvent
+    self.invitePlayerFunction = invitePlayerFunction
+    self.playerInvitedEvent = playerInvitedEvent
+end
+
+function LobbyService:BroadcastPlayerInvited(targetPlayerUserId, invite)
+    if not self.playerInvitedEvent then
+        return
+    end
+
+    local targetPlayer = Players:GetPlayerByUserId(targetPlayerUserId)
+
+    if targetPlayer then
+        self.playerInvitedEvent:FireClient(targetPlayer, invite)
+    end
 end
 
 function LobbyService:BroadcastStartGame(roomId)
@@ -447,8 +603,49 @@ function LobbyService:BroadcastPlayerStatusChange(roomId, playerUserId, newStatu
     end
 end
 
+function LobbyService:GetPlayerRoomId(playerUserId)
+    for roomId, room in pairs(self.roomsById) do
+        if table.find(room.playerUserIds, playerUserId) then
+            return roomId
+        end
+    end
+
+    return nil
+end
+
 function LobbyService:GenerateRoomId()
     return HttpService:GenerateGUID(false)
+end
+
+function LobbyService:GenerateInvite(playerInviter, playerInvitee)
+	local inviteId = self:GenerateInviteId()
+
+	local invite = {
+		id = inviteId,
+		inviterUserId = playerInviter.UserId,
+		inviteeUserId = playerInvitee.UserId,
+		expiresAt = os.time() + 12,
+	}
+
+	Invites[inviteId] = invite
+
+	task.delay(12, function()
+		if Invites[inviteId] == invite then
+			Invites[inviteId] = nil
+		end
+	end)
+
+	return invite
+end
+
+function LobbyService:GenerateInviteId()
+    local Id
+
+	repeat
+		Id = HttpService:GenerateGUID(false)
+	until not Invites[Id]
+
+	return Id
 end
 
 function LobbyService:GenerateAccessCode()

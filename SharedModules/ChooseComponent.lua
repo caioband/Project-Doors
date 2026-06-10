@@ -1,13 +1,39 @@
+--[[
+
+ _______  _______  ___   _______  _______  _______  __    _  ______  
+|       ||   _   ||   | |       ||  _    ||   _   ||  |  | ||      | 
+|       ||  |_|  ||   | |   _   || |_|   ||  |_|  ||   |_| ||  _    |
+|       ||       ||   | |  | |  ||       ||       ||       || | |   |
+|      _||       ||   | |  |_|  ||  _   | |       ||  _    || |_|   |
+|     |_ |   _   ||   | |       || |_|   ||   _   || | |   ||       |
+|_______||__| |__||___| |_______||_______||__| |__||_|  |__||______| 
+
+Made by Caio Bandeira
+
+WARNING: I'm not proud of what is written below... yet.
+
+Delete this warning when this component looks better (if that day ever comes).
+
+]]
+
+
 local Component = {}
 local PlayerGui = game.Players.LocalPlayer:WaitForChild("PlayerGui")
 local ChooseComponent = PlayerGui:WaitForChild("SharedGuis"):WaitForChild("ChooseComponent")
-local TwweenService = game:GetService("TweenService")
+local TweenService = game:GetService("TweenService")
 
 local Types = {"Center", "Corner"}
 local connections = {}
+local cornerButtonsconnections = {}
+
 
 local CurrentBlur = {}
 local PlayerGuiVisibilities = {}
+
+Component.CurrentCornerStack = 0
+Component.CornerStack = {}
+Component.CornerFirstPos = ChooseComponent.Frame:WaitForChild("Corner").Position
+Component.CornerYOffset = 0.15
 
 type ComponentData = {
     type: string,
@@ -43,13 +69,12 @@ function HandleCloseEffect(component)
     local Frame = component.Parent
 
     if Frame then
-        local Tween = TwweenService:Create(Frame, TweenInfo.new(0.5), {BackgroundTransparency = 1})
+        local Tween = TweenService:Create(Frame, TweenInfo.new(0.5), {BackgroundTransparency = 1})
         Tween:Play()
     end
     
     if CurrentBlur.Instance then
-        print("b")
-        local Tween = TwweenService:Create(CurrentBlur.Instance, TweenInfo.new(0.5), {Size = 0})
+        local Tween = TweenService:Create(CurrentBlur.Instance, TweenInfo.new(0.5), {Size = 0})
         Tween:Play()
     end
 end
@@ -62,13 +87,97 @@ function ClearConnections()
     connections = {}
 end
 
+function InsertCornerComponent(data : ComponentData)
+    local ComponentObject = ChooseComponent.Frame:WaitForChild("Corner"):Clone()
+    local buttons = ComponentObject:WaitForChild("Buttons")
+    local confirm = buttons:WaitForChild("Confirm")
+    local cancel = buttons:WaitForChild("Cancel")
+
+    local function releaseComponent()
+        local tween = TweenService:Create(ComponentObject, TweenInfo.new(0.3), {Position = UDim2.fromScale(ComponentObject.Position.X.Scale + 1, ComponentObject.Position.Y.Scale), ImageTransparency = 1})
+        tween:Play()
+        tween.Completed:Wait()
+        ComponentObject:Destroy()
+        table.remove(Component.CornerStack, table.find(Component.CornerStack, ComponentObject))
+    end
+
+    table.insert(Component.CornerStack, 1 ,ComponentObject)
+
+    for i,v in pairs(Component.CornerStack) do
+
+        if data.confirmText then
+            confirm.Visible = true
+        end
+
+        if data.cancelText then
+            cancel.Visible = true
+        end
+
+        if i > 1 then 
+            local TargetPos = UDim2.fromScale(v.Position.X.Scale, v.Position.Y.Scale - (v.Size.Y.Scale/2) - Component.CornerYOffset)
+            local tween = TweenService:Create(v, TweenInfo.new(0.3), {Position = TargetPos})
+            task.delay(1/10*i, function()
+                v.Visible = true
+                tween:Play() 
+            end)
+        else
+            local TargetPos = Component.CornerFirstPos
+            v.Name = "Corner"..#Component.CornerStack
+            local tween = TweenService:Create(v, TweenInfo.new(0.3), {Position = TargetPos})
+            task.delay(.2, function()
+                v.Parent = ChooseComponent:WaitForChild("Frame")
+                v.Visible = true
+                v.Position = UDim2.fromScale(Component.CornerFirstPos.X.Scale + (v.Size.X.Scale/2), Component.CornerFirstPos.Y.Scale)
+                tween:Play()
+            end)
+        end
+    end
+
+    local confirmConn
+    local cancelConn
+
+    confirmConn = confirm.Activated:Once(function()
+        print("leak test")
+        if data.confirmCallback then
+            data.confirmCallback()
+        end
+        releaseComponent()
+        cancelConn:Disconnect()
+        confirmConn:Disconnect()
+        cancelConn = nil
+        confirmConn = nil
+    end)
+
+    cancelConn = cancel.Activated:Once(function()
+        print("leak test")
+        if data.cancelCallback then
+            data.cancelCallback()
+        end
+        releaseComponent()
+        cancelConn:Disconnect()
+        confirmConn:Disconnect()
+        cancelConn = nil
+        confirmConn = nil
+    end)
+
+    if data.delay then
+        task.delay(data.delay, function()
+            local tween = TweenService:Create(ComponentObject, TweenInfo.new(0.3), {Position = UDim2.fromScale(ComponentObject.Position.X.Scale + 1, ComponentObject.Position.Y.Scale), ImageTransparency = 1})
+            tween:Play()
+            tween.Completed:Wait()
+            ComponentObject:Destroy()
+            table.remove(Component.CornerStack, table.find(Component.CornerStack, ComponentObject))
+        end)
+    end
+end
+
 function HandleOpenEffect(component)
     local Lighting = game:GetService("Lighting")
     local Blur = Lighting:FindFirstChildWhichIsA("BlurEffect")
     local Frame = component.Parent
 
     if Frame then
-        local Tween = TwweenService:Create(Frame, TweenInfo.new(0.5), {BackgroundTransparency = 0.7})
+        local Tween = TweenService:Create(Frame, TweenInfo.new(0.5), {BackgroundTransparency = 0.7})
         Tween:Play()
     end
 
@@ -79,7 +188,7 @@ function HandleOpenEffect(component)
             Existed = true
         }
         
-        local Tween = TwweenService:Create(Blur, TweenInfo.new(0.5), {Size = 24})
+        local Tween = TweenService:Create(Blur, TweenInfo.new(0.5), {Size = 24})
         Tween:Play()
     else
 
@@ -93,14 +202,14 @@ function HandleOpenEffect(component)
             Existed = false
         }
 
-        local Tween = TwweenService:Create(NewBlur, TweenInfo.new(0.5), {Size = 24})
+        local Tween = TweenService:Create(NewBlur, TweenInfo.new(0.5), {Size = 24})
         Tween:Play()
     end
 end
 
 
 function Component:Show(data : ComponentData)
-
+    print(data)
     assert(table.find(Types, data.type), "Invalid component type: " .. data.type)
     assert(typeof(data) == "table", "table expected for data, got " .. typeof(data))
     assert(typeof(data.type) == "string", "string expected for component type, got " .. typeof(data.type))
@@ -113,13 +222,17 @@ function Component:Show(data : ComponentData)
     
 
     local Component = ChooseComponent.Frame:WaitForChild(data.type)
-    Component.Visible = true
     Component.Content.Text = data.content
 
-    Component.Buttons.Confirm.TextLabel.Text = "Ok"
-    Component.Buttons.Confirm.Visible = true
+
+    if data.type == "Corner" then
+        InsertCornerComponent(data)
+    else
+        Component.Visible = true
+    end
 
     if data.confirmText then
+        Component.Buttons.Confirm.Visible = true
         Component.Buttons.Confirm.TextLabel.Text = data.confirmText
     end
 
@@ -131,16 +244,22 @@ function Component:Show(data : ComponentData)
     if data.confirmCallback then
         table.insert(connections, Component.Buttons.Confirm.Activated:Once(function()
             data.confirmCallback()
-            Component.Visible = false
-            HandleCloseEffect(Component)
-            RestoreAllUIs()
+            if data.type ~= "Corner" then
+                Component.Visible = false   
+                HandleCloseEffect(Component)
+                RestoreAllUIs()
+            end
+            print("callback confirmed")
             ClearConnections()
         end))
     else
         table.insert(connections, Component.Buttons.Confirm.Activated:Once(function()
-            Component.Visible = false
-            HandleCloseEffect(Component)
-            RestoreAllUIs()
+            if data.type ~= "Corner" then   
+                Component.Visible = false
+                HandleCloseEffect(Component)
+                RestoreAllUIs()
+            end
+            print("no callback")
             ClearConnections()
         end))
     end
@@ -148,30 +267,38 @@ function Component:Show(data : ComponentData)
     if data.cancelCallback then
         table.insert(connections, Component.Buttons.Cancel.Activated:Once(function()
             data.cancelCallback()
-            Component.Visible = false
-            HandleCloseEffect(Component)
-            RestoreAllUIs()
+            if data.type ~= "Corner" then   
+                Component.Visible = false
+                HandleCloseEffect(Component)
+                RestoreAllUIs()
+            end
             ClearConnections()
         end))
     else
         table.insert(connections, Component.Buttons.Cancel.Activated:Once(function()
-            Component.Visible = false
-            HandleCloseEffect(Component)
-            RestoreAllUIs()
+            if data.type ~= "Corner" then   
+                Component.Visible = false
+                HandleCloseEffect(Component)
+                RestoreAllUIs()
+            end
             ClearConnections()
         end))
     end
 
     if data.delay then
         task.delay(data.delay, function()
-            Component.Visible = false
-            HandleCloseEffect(Component)
-            RestoreAllUIs()
+            if data.type ~= "Corner" then   
+                Component.Visible = false
+                HandleCloseEffect(Component)
+                RestoreAllUIs()
+            end
             ClearConnections()
         end)
     end
-    HandleOpenEffect(Component)
-    HideAllUIs()
+    if data.type ~= "Corner" then
+         HandleOpenEffect(Component)
+         HideAllUIs()
+    end
 end
 
 return Component

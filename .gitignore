@@ -4,3 +4,4 @@ sourcemap.json
 *.rbxlx
 .github/
 .vscode/
+.VSCodeCounter/

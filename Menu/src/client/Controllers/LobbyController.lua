@@ -2,16 +2,35 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Player = Players.LocalPlayer
 local PlayerGui = Player:WaitForChild("PlayerGui")
+local RunService = game:GetService("RunService")
 
 local LobbyController = {}
 local RoomOptionsController
 local RoomController
 local SharedModules = ReplicatedStorage:WaitForChild("Shared"):WaitForChild("SharedModules")
 
+local PendingInvites = {}
+
+local PlayerInvitedEvent = ReplicatedStorage:WaitForChild("Comms"):WaitForChild("Lobby"):WaitForChild("PlayerInvited")
+
+local JoinRoomFunction = ReplicatedStorage:WaitForChild("Comms"):WaitForChild("Lobby"):WaitForChild("JoinRoom")
+
+
 
 local ToggleLoading = require(SharedModules.ToggleLoading)
+local ChooseComponent = require(SharedModules.ChooseComponent)
 
 local JoinButtonConnections = {}
+
+type ChooseComponentData = {
+    type: string,
+    delay: number?,
+    content: string,
+    confirmText: string?,
+    cancelText: string?,
+    confirmCallback: (() -> ())?,
+    cancelCallback: (() -> ())?,
+}
 
 local function disconnectConnection(connection)
     if connection then
@@ -19,6 +38,10 @@ local function disconnectConnection(connection)
     end
 
     return nil
+end
+
+local function alert(data: ChooseComponentData)
+    ChooseComponent:Show(data)
 end
 
 local function findFirstGuiObjectByName(instance, name)
@@ -46,6 +69,15 @@ local function setTextIfPresent(container, candidateNames, text)
     end
 
     return false
+end
+
+local function HideAllHudUis()
+    local Hud = PlayerGui:WaitForChild("Hud")
+    for _, child in ipairs(Hud:GetChildren()) do
+        if child:IsA("GuiObject") then
+            child.Visible = false
+        end
+    end
 end
 
 local function getRoomOccupancyText(roomData)
@@ -304,6 +336,56 @@ function LobbyController:Start()
     self.scrollingFrameAddedConnection = nil
     self.scrollingFrameRemovingConnection = nil
     self.backButtonConnection = nil
+
+    PlayerInvitedEvent.OnClientEvent:Connect(function(invite)
+        local success, inviterName = pcall(Players.GetNameFromUserIdAsync, Players, invite.inviterUserId)
+
+        if not success then
+        	inviterName = if RunService:IsStudio() then "Ur mom" else "Unknown"
+        end
+
+        if not PendingInvites[invite.inviterUserId] then
+            PendingInvites[invite.inviterUserId] = invite
+            alert({
+                type = "Corner",
+                content = string.format("You've been invited to a room by %s!", inviterName),
+                confirmText = "Join",
+                cancelText = "Dismiss",
+                delay = 10,
+                confirmCallback = function()
+                    local success, response, joinError = pcall(function()
+                        local joinedRoom, errorMessage = JoinRoomFunction:InvokeServer(invite.roomId, invite)
+                        return joinedRoom, errorMessage
+                    end)
+                    print(response, joinError)
+
+                    if not success then
+                        warn("JoinRoom invoke failed:", tostring(response))
+                        return
+                    end
+                    if not response then
+                        warn("JoinRoom failed:", tostring(joinError))
+                        return
+                    else
+                        RunService:UnbindFromRenderStep("ScenarioControllerRender")
+                        self:ToggleVisibility(false)
+                        self:ClearJoinButtonConnections()
+                        RoomOptionsController:UnbindButtons()
+                        HideAllHudUis()
+                        ToggleLoading:Toggle(true)
+                        RoomController:LoadRoom(response):await()
+                        ToggleLoading:Toggle(false)
+                    end
+                end,
+                cancelCallback = function()
+                    PendingInvites[invite.inviterUserId] = nil
+                end,
+            })
+            task.delay(10, function()
+                PendingInvites[invite.inviterUserId] = nil
+            end)
+        end
+    end)
 end
 
 return LobbyController

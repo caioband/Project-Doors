@@ -6,43 +6,66 @@ local CreateRoomController
 
 local RoomOptionsController = {}
 
-local function bindButton(button, attributeName, callback)
-    if not button or button:GetAttribute(attributeName) then
-        return
-    end
+RoomOptionsController.Connections = {}
 
-    button:SetAttribute(attributeName, true)
-    button.Activated:Connect(callback)
+local function bindButton(controller, button, key, callback)
+	if not button then
+		return
+	end
+
+	controller:UnbindButton(key)
+
+	controller.Connections[key] = button.Activated:Connect(callback)
+end
+
+function RoomOptionsController:UnbindButton(key)
+	local connection = self.Connections[key]
+
+	if connection then
+		connection:Disconnect()
+		self.Connections[key] = nil
+	end
+end
+
+function RoomOptionsController:UnbindButtons()
+	for key, connection in pairs(self.Connections) do
+		connection:Disconnect()
+		self.Connections[key] = nil
+	end
 end
 
 function RoomOptionsController:BindOptionsButtons()
-    local Hud = PlayerGui:WaitForChild("Hud")
-    local RoomOptions = Hud:WaitForChild("RoomOptions")
-    local JoinRoom = Hud:WaitForChild("JoinRoom")
-    local CreateRoom = Hud:WaitForChild("CreateRoom")
+	local Hud = PlayerGui:WaitForChild("Hud")
+	local RoomOptions = Hud:WaitForChild("RoomOptions")
+	local JoinRoom = Hud:WaitForChild("JoinRoom")
+	local CreateRoom = Hud:WaitForChild("CreateRoom")
 
-    local JoinRoomButton = RoomOptions:WaitForChild("JoinRoom")
-    local CreateRoomButton = RoomOptions:WaitForChild("CreateRoom")
-    local BackButton = RoomOptions:WaitForChild("Back")
+	local JoinRoomButton = RoomOptions:WaitForChild("JoinRoom")
+	local CreateRoomButton = RoomOptions:WaitForChild("CreateRoom")
+	local BackButton = RoomOptions:WaitForChild("Back")
 
-    bindButton(BackButton, "RoomOptionsBound", function()
-            RoomOptions.Visible = false
-            MenuController:BindMenuButtons()
-        end)
+	bindButton(self, BackButton, "Back", function()
+		RoomOptions.Visible = false
 
-    bindButton(JoinRoomButton, "RoomOptionsBound", function()
-            RoomOptions.Visible = false
-            JoinRoom.Visible = true
-            print("Binding lobby buttons")
-            LobbyController:BindLobbyButtons()
-        end)
+		self:UnbindButtons()
+		MenuController:BindMenuButtons()
+	end)
 
-    bindButton(CreateRoomButton, "RoomOptionsBound", function()
-            RoomOptions.Visible = false
-            CreateRoom.Visible = true
-            CreateRoomController:Open()
-        end)
+	bindButton(self, JoinRoomButton, "JoinRoom", function()
+		RoomOptions.Visible = false
+		JoinRoom.Visible = true
 
+		self:UnbindButtons()
+		LobbyController:BindLobbyButtons()
+	end)
+
+	bindButton(self, CreateRoomButton, "CreateRoom", function()
+		RoomOptions.Visible = false
+		CreateRoom.Visible = true
+
+		self:UnbindButtons()
+		CreateRoomController:Open()
+	end)
 end
 
 function RoomOptionsController:Start()
