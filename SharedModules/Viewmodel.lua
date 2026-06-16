@@ -62,6 +62,7 @@ function Viewmodel.new(config: ViewmodelConfig?)
 	self.HumanoidRootPart = nil
 
 	self.IsRunning = false
+	self.FreeMouse = false
 	self.BaseWalkSpeed = 16
 	self.CurrentBobTime = 0
 	self.IdleBobTime = 0
@@ -115,6 +116,14 @@ end
 function Viewmodel:_update(deltaTime: number)
 	if not self.Character or not self.Humanoid or not self.HumanoidRootPart then
 		return
+	end
+
+	-- A câmera padrão do Roblox força LockCenter todo frame em primeira pessoa,
+	-- então reforçamos o mouse livre aqui para não ser sobrescrito.
+	if self.FreeMouse then
+		if UserInputService.MouseBehavior ~= Enum.MouseBehavior.Default then
+			UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+		end
 	end
 
 	-- Calculate movement velocity (horizontal only, so falling/jumping doesn't spike the bob)
@@ -219,9 +228,10 @@ function Viewmodel:_update(deltaTime: number)
 	self.LeanRotation = self.LeanRotation:Lerp(targetLean, leanAlpha)
 	bobRotation += self.LeanRotation
 
-	-- Camera sway based on mouse movement
+	-- Camera sway based on mouse movement (desativado enquanto o mouse estiver livre,
+	-- já que o cursor não está travado no centro e o delta não representa movimento de câmera)
 	local swayRotation = Vector3.new(0, 0, 0)
-	if self.Config.EnableCameraSway then
+	if self.Config.EnableCameraSway and not self.FreeMouse then
 		local mouseDelta = UserInputService:GetMouseDelta()
 		local intensity = self.Config.SwayIntensity
 
@@ -265,6 +275,25 @@ function Viewmodel:SetFirstPerson(enabled: boolean)
 		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 		UserInputService.MouseIconEnabled = true
 	end
+end
+
+function Viewmodel:SetFreeMouse(enabled: boolean)
+	self.FreeMouse = enabled
+
+	if enabled then
+		-- Libera o mouse e restaura o ícone/cursor padrão
+		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+		UserInputService.MouseIconEnabled = true
+	else
+		-- Volta a travar o mouse no centro (primeira pessoa)
+		UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+		UserInputService.MouseIconEnabled = false
+	end
+end
+
+function Viewmodel:ToggleFreeMouse(): boolean
+	self:SetFreeMouse(not self.FreeMouse)
+	return self.FreeMouse
 end
 
 function Viewmodel:SetConfig(newConfig: ViewmodelConfig)

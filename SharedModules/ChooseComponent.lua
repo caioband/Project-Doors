@@ -74,8 +74,19 @@ function HandleCloseEffect(component)
     end
     
     if CurrentBlur.Instance then
-        local Tween = TweenService:Create(CurrentBlur.Instance, TweenInfo.new(0.5), {Size = 0})
+        local blur = CurrentBlur.Instance
+        local createdByComponent = not CurrentBlur.Existed
+        -- Blurs criados aqui voltam a 0 e sao destruidos; blurs que ja existiam
+        -- (ex: o blur da loja) sao restaurados ao tamanho original para nao os apagar.
+        local targetSize = createdByComponent and 0 or CurrentBlur.Size
+        local Tween = TweenService:Create(blur, TweenInfo.new(0.5), {Size = targetSize})
         Tween:Play()
+        if createdByComponent then
+            Tween.Completed:Once(function()
+                blur:Destroy()
+            end)
+        end
+        CurrentBlur = {}
     end
 end
 
