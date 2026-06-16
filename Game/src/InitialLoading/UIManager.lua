@@ -13,6 +13,7 @@ local DOT_TWEEN_INFO = TweenInfo.new(0.05, Enum.EasingStyle.Quad, Enum.EasingDir
 
 
 local Packages = ReplicatedStorage:WaitForChild("ExternalPackages")
+local Controls = require(LocalPlayer.PlayerScripts:WaitForChild("PlayerModule")):GetControls()
 local Promise = require(Packages.promise)
 local LoadingScreen = {}
 LoadingScreen.__index = LoadingScreen
@@ -294,16 +295,12 @@ function LoadingScreen:LoadFinished()
     TweenDescendantsAsync(Main.Parent.Parent)
 
     task.delay(2, function()
-
         local CurrentStep = 1
-		local CurrentCamera = workspace.CurrentCamera
-		CurrentCamera.CameraType = Enum.CameraType.Scriptable
         self:ClearDots()
         CreditsLoop(CreditsAndWarning, CurrentStep):await()
-		CurrentCamera.CFrame = workspace:WaitForChild("Cameras"):WaitForChild("Menu").CFrame
-		CurrentCamera.FieldOfView = 60
 		ReplicatedFirst:SetAttribute("Loaded", true)
 		self:Disable()
+		Controls:Enable()
     end)
 end
 

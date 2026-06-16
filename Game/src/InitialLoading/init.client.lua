@@ -6,7 +6,7 @@ local LocalPlayer = Players.LocalPlayer
 local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 local Humanoid = Character:WaitForChild("Humanoid")
 local Controls = require(LocalPlayer.PlayerScripts:WaitForChild("PlayerModule")):GetControls()
-local Core = require(script:WaitForChild("Core"))
+local Core = require(ReplicatedFirst:WaitForChild("SharedModulesFirst"):WaitForChild("Preloader"))
 local UIManager = require(script:WaitForChild("UIManager"))
 local UIEffectCallbacks = require(
     ReplicatedStorage
@@ -24,14 +24,17 @@ UIEffectCallbacks.Start()
 UIManager:Enable()
 Controls:Disable()
 
+local WalkSpeedValue = Humanoid.WalkSpeed
+local JumpPowerValue = Humanoid.JumpPower
+local JumpHeightValue = Humanoid.JumpHeight
+local AutoRotateValue = Humanoid.AutoRotate
+
 Humanoid.WalkSpeed = 0
 Humanoid.JumpPower = 0
 Humanoid.JumpHeight = 0
 Humanoid.AutoRotate = false
 
 UIManager:SetCurrentStepText("Preloader")
-Preloader:AddAssetsToPreload(workspace:WaitForChild("Menu"):GetDescendants())
-Preloader:AddAssetsToPreload(workspace:WaitForChild("MenuUI3D"):GetDescendants())
 Preloader:AddAssetsToPreload(LocalPlayer.PlayerGui:WaitForChild("Loading"):GetDescendants())
 
 Preloader.PreloadStarted:Connect(function(totalAssets)
@@ -56,6 +59,10 @@ Preloader.PreloadFinished:Connect(function()
         task.wait(0.1)
     end
     UIManager:LoadFinished()
+    Humanoid.WalkSpeed = WalkSpeedValue
+    Humanoid.JumpPower = JumpPowerValue
+    Humanoid.JumpHeight = JumpHeightValue
+    Humanoid.AutoRotate = AutoRotateValue
 end)
 
 Preloader:Start()

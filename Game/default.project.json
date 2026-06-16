@@ -35,7 +35,7 @@
     "ReplicatedFirst": {
       "$className": "ReplicatedFirst",
       "LoadingController": {
-        "$path": "src/LoadingController"
+        "$path": "src/InitialLoading"
       },
       "SharedModulesFirst": {
         "$path": "../SharedModulesFirst"
