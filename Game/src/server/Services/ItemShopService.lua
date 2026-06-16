@@ -91,9 +91,20 @@ local function GrantItem(player: Player, item: Item)
 end
 
 
--- Handler de GetItems: devolve a lista de itens para o cliente renderizar.
-local function OnGetItems(_player: Player): { Item }
-    return Items
+-- Handler de GetItems: devolve a lista de itens (com flag Owned por jogador) para o cliente renderizar.
+local function OnGetItems(player: Player): { any }
+    local owned = OwnedItems[player] or {}
+    local result = {}
+    for _, item in ipairs(Items) do
+        table.insert(result, {
+            Id = item.Id,
+            Name = item.Name,
+            Price = item.Price,
+            Icon = item.Icon,
+            Owned = owned[item.Id] == true,
+        })
+    end
+    return result
 end
 
 
