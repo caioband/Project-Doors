@@ -19,7 +19,7 @@ function ViewmodelController:Start()
 		HeadBobMaxLeanForward = 0.001,
 		HeadBobMaxLeanSide = 1,
 		HeadBobLeanDebounce = 1,
-		SwayIntensity = 0.01,
+		SwayIntensity = 0.002,
 		DefaultFOV = 70,
 		SprintFOV = 80,
 		FOVTransitionSpeed = 5,

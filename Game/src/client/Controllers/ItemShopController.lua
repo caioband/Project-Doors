@@ -19,7 +19,7 @@ local BLUR_SIZE = 18
 local BLUR_TWEEN = TweenInfo.new(0.4)
 
 -- Folga somada ao MaxActivationDistance do prompt antes de fechar a loja automaticamente.
-local DISTANCE_BUFFER = 5
+local DISTANCE_BUFFER = 0
 
 local ItemShopController = {}
 
@@ -174,6 +174,36 @@ local function MarkOwned(card)
 end
 
 
+-- Adiciona o item comprado a Hotbar via HotbarHandlerController.
+local function AddToHotbar(item)
+    local getController = ItemShopController.GetController
+    if not getController then
+        return
+    end
+    local hotbarController = getController("HotbarHandlerController")
+    if hotbarController then
+        hotbarController:AddItem(item)
+    end
+end
+
+
+-- Pre-carrega os assets do item comprado (ex.: animacoes da Flashlight) em segundo
+-- plano, para que o item ja esteja pronto quando equipado pela primeira vez.
+-- Roda em task.spawn para nao travar a UI da loja enquanto baixa.
+local function PreloadItemAssets(item)
+    local getController = ItemShopController.GetController
+    if not getController then
+        return
+    end
+    local hotbarController = getController("HotbarHandlerController")
+    if hotbarController then
+        task.spawn(function()
+            hotbarController:PreloadItemAssets(item)
+        end)
+    end
+end
+
+
 -- Cria um card de item a partir do template e configura o botao de compra.
 local function RenderItem(item)
     local card = Template:Clone()
@@ -209,6 +239,8 @@ local function RenderItem(item)
 
         if response.success then
             MarkOwned(card)
+            AddToHotbar(item)
+            PreloadItemAssets(item)
         else
             card.BuyBtn.Active = true
         end

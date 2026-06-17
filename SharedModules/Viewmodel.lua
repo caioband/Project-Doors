@@ -3,6 +3,10 @@
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ReplicatedFirst = game:GetService("ReplicatedFirst")
+
+local Preloader = require(ReplicatedFirst:WaitForChild("SharedModulesFirst"):WaitForChild("Preloader"))
 
 local Viewmodel = {}
 Viewmodel.__index = Viewmodel
@@ -60,6 +64,11 @@ function Viewmodel.new(config: ViewmodelConfig?)
 	self.Character = nil
 	self.Humanoid = nil
 	self.HumanoidRootPart = nil
+
+	-- Modelo de viewmodel clonado e anexado à câmera (criado em :CloneViewmodel)
+	self.ViewmodelModel = nil
+	-- Offset aplicado à root do viewmodel em relação à câmera (ver :SetViewmodelOffset)
+	self.ViewmodelOffset = CFrame.new()
 
 	self.IsRunning = false
 	self.FreeMouse = false
@@ -253,6 +262,34 @@ function Viewmodel:_update(deltaTime: number)
 	local swayCFrame = CFrame.Angles(swayRotation.X, swayRotation.Y, swayRotation.Z)
 	self.Camera.CFrame = self.Camera.CFrame * bobCFrame * swayCFrame
 
+	-- Acompanha o viewmodel clonado com a câmera e aplica o sway (da config) ao modelo.
+	-- A câmera já inclui bob/sway, então o modelo herda esse movimento por seguir a câmera;
+	-- o swayCFrame extra dá ao viewmodel o balanço característico de arma vindo de SwayIntensity.
+	if self.ViewmodelModel then
+		local root = self.ViewmodelModel.PrimaryPart
+		if root then
+			-- Compensa o FOV: ao mudar o FOV (ex.: sprint), o viewmodel pareceria encolher e
+			-- se afastar. Para manter o mesmo tamanho/posição aparente na tela, a distância do
+			-- modelo até a câmera precisa escalar por tan(FOVbase/2) / tan(FOVatual/2).
+			local baseFOV = self.Config.DefaultFOV :: number
+			local fovScale = math.tan(math.rad(baseFOV / 2)) / math.tan(math.rad(self.CurrentFOV / 2))
+
+			-- Profundidade do modelo à frente da root (em studs). Como a root é colada à câmera,
+			-- essa é a distância da "ponta" do viewmodel até o olho; é ela que precisa escalar.
+			-- (forward = -Z no espaço da root.)
+			local center = self.ViewmodelModel:GetBoundingBox().Position
+			local depth = -(root.CFrame:PointToObjectSpace(center).Z)
+
+			-- Reposiciona a root para que (offset lateral + profundidade) escale por fovScale:
+			--   pos = offsetLateral * fovScale  +  recuo ao longo do forward p/ ajustar a profundidade.
+			local pos = self.ViewmodelOffset.Position * fovScale
+				+ Vector3.new(0, 0, depth * (1 - fovScale))
+			local fovOffset = self.ViewmodelOffset.Rotation + pos
+
+			root.CFrame = self.Camera.CFrame * swayCFrame * fovOffset
+		end
+	end
+
 	-- Update FOV for sprint
 	local targetFOV = self.IsRunning and self.Config.SprintFOV or self.Config.DefaultFOV
 	self.CurrentFOV = self.CurrentFOV + (targetFOV - self.CurrentFOV) * self.Config.FOVTransitionSpeed * deltaTime
@@ -302,7 +339,217 @@ function Viewmodel:SetConfig(newConfig: ViewmodelConfig)
 	end
 end
 
+-- Clona o modelo de viewmodel de ReplicatedStorage.Assets.Models.Viewmodel.Viewmodel,
+-- posiciona a root (PrimaryPart) na CFrame da câmera atual e anexa o modelo à câmera.
+function Viewmodel:CloneViewmodel(): Model?
+	-- Garante que não exista um viewmodel anterior pendurado na câmera
+	self:DestroyViewmodel()
+
+	local template = ReplicatedStorage
+		:WaitForChild("Assets")
+		:WaitForChild("Models")
+		:WaitForChild("Viewmodel")
+		:WaitForChild("Viewmodel")
+
+	local clone = template:Clone()
+
+	-- Posiciona a root do viewmodel exatamente na CFrame da câmera atual.
+	local root = clone.PrimaryPart or clone:FindFirstChild("HumanoidRootPart")
+	if root and root:IsA("BasePart") then
+		root.CFrame = self.Camera.CFrame
+	end
+
+	clone.Parent = self.Camera
+	self.ViewmodelModel = clone
+
+	return clone
+end
+
+-- Destrói um dos braços (ex.: "LeftArm" / "RightArm") do viewmodel atual.
+function Viewmodel:DestroyArm(armName: string)
+	if not self.ViewmodelModel then
+		warn("Viewmodel:DestroyArm chamado sem um viewmodel ativo (use :CloneViewmodel primeiro)")
+		return
+	end
+
+	local arm = self.ViewmodelModel:FindFirstChild(armName)
+	if not arm then
+		warn(("Viewmodel:DestroyArm: braço '%s' não encontrado no viewmodel"):format(armName))
+		return
+	end
+
+	arm:Destroy()
+end
+
+-- Clona um modelo/peça de item, posiciona-o no AttachPart do braço direito e o
+-- parenteia ao próprio ViewmodelModel. Se o AttachPart tiver um Weld pré-configurado
+-- com o mesmo nome do item (ex.: "Flashlight"), liga esse Weld ao clone para que o item
+-- acompanhe a animação do braço (o C0 do Weld define o encaixe relativo ao AttachPart).
+-- Retorna o clone.
+function Viewmodel:AttachItemToRightArm(template: Instance): Instance?
+	if not self.ViewmodelModel then
+		warn("Viewmodel:AttachItemToRightArm chamado sem um viewmodel ativo (use :CloneViewmodel primeiro)")
+		return nil
+	end
+
+	local rightArm = self.ViewmodelModel:FindFirstChild("RightArm")
+	if not rightArm then
+		warn("Viewmodel:AttachItemToRightArm: 'RightArm' não encontrado no viewmodel")
+		return nil
+	end
+
+	-- O RightArm tem um Part e um Motor6D ambos chamados "AttachPart"; queremos a peça.
+	local attachPart: BasePart? = nil
+	for _, child in ipairs(rightArm:GetChildren()) do
+		if child.Name == "AttachPart" and child:IsA("BasePart") then
+			attachPart = child
+			break
+		end
+	end
+
+	if not attachPart then
+		warn("Viewmodel:AttachItemToRightArm: 'AttachPart' (BasePart) não encontrado no RightArm")
+		return nil
+	end
+
+	local clone = template:Clone()
+
+	-- Posiciona o item na CFrame do AttachPart (o Weld, se houver, refina o encaixe).
+	if clone:IsA("Model") then
+		clone:PivotTo(attachPart.CFrame)
+	elseif clone:IsA("BasePart") then
+		clone.CFrame = attachPart.CFrame
+	end
+
+	clone.Parent = self.ViewmodelModel
+
+	-- Liga o Weld pré-configurado (mesmo nome do item) ao clone, se existir.
+	local weld = attachPart:FindFirstChild(clone.Name)
+	if weld and weld:IsA("Weld") then
+		weld.Part1 = if clone:IsA("BasePart") then clone else clone.PrimaryPart
+	end
+
+	return clone
+end
+
+-- Clona uma pasta específica de animações de ReplicatedStorage.Assets.Anims.Viewmodel
+-- (ex.: "Flashlight") e a coloca dentro da pasta "Anims" do viewmodel atual do player.
+function Viewmodel:CloneAnimsFolder(folderName: string): Folder?
+	if not self.ViewmodelModel then
+		warn("Viewmodel:CloneAnimsFolder chamado sem um viewmodel ativo (use :CloneViewmodel primeiro)")
+		return nil
+	end
+
+	local sourceFolder = ReplicatedStorage
+		:WaitForChild("Assets")
+		:WaitForChild("Anims")
+		:WaitForChild("Viewmodel")
+		:FindFirstChild(folderName)
+
+	if not sourceFolder then
+		warn(("Viewmodel:CloneAnimsFolder: pasta de animações '%s' não encontrada"):format(folderName))
+		return nil
+	end
+
+	local destFolder = self.ViewmodelModel:FindFirstChild("Anims")
+	if not destFolder then
+		warn("Viewmodel:CloneAnimsFolder: pasta 'Anims' não encontrada no viewmodel atual")
+		return nil
+	end
+
+	local clone = sourceFolder:Clone()
+	clone.Parent = destFolder
+
+	return clone
+end
+
+-- Pré-carrega (via Preloader) todas as animações presentes na pasta "Anims"
+-- do viewmodel atual do player.
+function Viewmodel:LoadViewmodelAnims()
+	if not self.ViewmodelModel then
+		warn("Viewmodel:LoadViewmodelAnims chamado sem um viewmodel ativo (use :CloneViewmodel primeiro)")
+		return
+	end
+
+	local animsFolder = self.ViewmodelModel:FindFirstChild("Anims")
+	if not animsFolder then
+		warn("Viewmodel:LoadViewmodelAnims: pasta 'Anims' não encontrada no viewmodel atual")
+		return
+	end
+
+	local animations = {}
+	for _, descendant in ipairs(animsFolder:GetDescendants()) do
+		if descendant:IsA("Animation") then
+			table.insert(animations, descendant)
+		end
+	end
+
+	if #animations == 0 then
+		return
+	end
+
+	local preloader = Preloader.new()
+	preloader:SetAssetsToPreload(animations)
+	preloader:PreloadAssets()
+	preloader:Destroy()
+end
+
+-- Pré-carrega (via Preloader) as animações de uma pasta de origem em
+-- ReplicatedStorage.Assets.Anims.Viewmodel (ex.: "Flashlight"), sem precisar de um
+-- viewmodel clonado. Útil para adiantar o download das animações de um item assim
+-- que ele é adquirido, deixando-o pronto para o primeiro equip.
+-- Atenção: yield (ContentProvider:PreloadAsync), chame em task.spawn se não quiser bloquear.
+function Viewmodel:PreloadAnimsFolder(folderName: string)
+	local sourceFolder = ReplicatedStorage
+		:WaitForChild("Assets")
+		:WaitForChild("Anims")
+		:WaitForChild("Viewmodel")
+		:FindFirstChild(folderName)
+
+	if not sourceFolder then
+		warn(("Viewmodel:PreloadAnimsFolder: pasta de animações '%s' não encontrada"):format(folderName))
+		return
+	end
+
+	local animations = {}
+	for _, descendant in ipairs(sourceFolder:GetDescendants()) do
+		if descendant:IsA("Animation") then
+			table.insert(animations, descendant)
+		end
+	end
+
+	if #animations == 0 then
+		return
+	end
+
+	local preloader = Preloader.new()
+	preloader:SetAssetsToPreload(animations)
+	preloader:PreloadAssets()
+	preloader:Destroy()
+end
+
+-- Define o offset da root do viewmodel atual em relação à câmera.
+-- Aceita uma CFrame, ou um Vector3/posição que é convertida para CFrame.new(...).
+-- O offset é aplicado todo frame no :_update, então vale para o viewmodel atual e os próximos.
+function Viewmodel:SetViewmodelOffset(offset: CFrame | Vector3)
+	if typeof(offset) == "Vector3" then
+		self.ViewmodelOffset = CFrame.new(offset)
+	else
+		self.ViewmodelOffset = offset
+	end
+end
+
+-- Destrói o modelo de viewmodel que foi clonado e anexado à câmera do player.
+function Viewmodel:DestroyViewmodel()
+	if self.ViewmodelModel then
+		self.ViewmodelModel:Destroy()
+		self.ViewmodelModel = nil
+	end
+end
+
 function Viewmodel:Destroy()
+	self:DestroyViewmodel()
+
 	for _, connection in ipairs(self.Connections) do
 		connection:Disconnect()
 	end
