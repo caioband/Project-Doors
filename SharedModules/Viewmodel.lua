@@ -71,6 +71,7 @@ function Viewmodel.new(config: ViewmodelConfig?)
 	self.ViewmodelOffset = CFrame.new()
 
 	self.IsRunning = false
+	self.IsPaused = false
 	self.FreeMouse = false
 	self.BaseWalkSpeed = 16
 	self.CurrentBobTime = 0
@@ -95,6 +96,11 @@ function Viewmodel:Start()
 		self:_setupCharacter(character)
 	end))
 
+	self:_bindRenderStep()
+end
+
+-- Liga o loop de render que atualiza câmera/viewmodel todo frame.
+function Viewmodel:_bindRenderStep()
 	RunService:BindToRenderStep(
 		"ViewmodelUpdate",
 		Enum.RenderPriority.Camera.Value + 1,
@@ -545,6 +551,45 @@ function Viewmodel:DestroyViewmodel()
 		self.ViewmodelModel:Destroy()
 		self.ViewmodelModel = nil
 	end
+end
+
+-- Pausa o viewmodel: para o loop de render (deixando a câmera livre para ser controlada
+-- por outro sistema, ex.: votação) e esconde o modelo clonado e quaisquer itens anexados
+-- (filhos do modelo) tirando-o da câmera. Guarda o estado para restaurar em :Resume.
+-- O FOV volta ao padrão para a câmera externa não herdar um FOV de sprint, por exemplo.
+function Viewmodel:Pause()
+	if self.IsPaused then
+		return
+	end
+	self.IsPaused = true
+
+	RunService:UnbindFromRenderStep("ViewmodelUpdate")
+
+	if self.ViewmodelModel then
+		self._pausedParent = self.ViewmodelModel.Parent
+		self.ViewmodelModel.Parent = nil
+	end
+
+	if self.Camera then
+		self.Camera.FieldOfView = self.Config.DefaultFOV :: number
+	end
+end
+
+-- Retoma o viewmodel após um :Pause: reexibe o modelo (devolvendo-o à câmera) e religa o
+-- loop de render. A câmera deve estar de volta ao tipo Custom antes de chamar isto.
+function Viewmodel:Resume()
+	if not self.IsPaused then
+		return
+	end
+	self.IsPaused = false
+
+	if self.ViewmodelModel then
+		self.ViewmodelModel.Parent = self._pausedParent or self.Camera
+		self._pausedParent = nil
+	end
+
+	self.CurrentFOV = self.Config.DefaultFOV :: number
+	self:_bindRenderStep()
 end
 
 function Viewmodel:Destroy()
