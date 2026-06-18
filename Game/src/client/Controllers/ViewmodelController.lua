@@ -23,6 +23,10 @@ function ViewmodelController:Start()
 		DefaultFOV = 70,
 		SprintFOV = 80,
 		FOVTransitionSpeed = 5,
+		-- Offset estático da câmera (primeira pessoa). CFrame ou Vector3 (posição).
+		-- Ex.: CFrame.new(0, 0.2, 0) para subir um pouco a câmera. Ajustável em runtime
+		-- via self.ViewmodelInstance:SetCameraOffset(...).
+		CameraOffset = CFrame.new(0,.8,0),
 	}
 
 	self.ViewmodelInstance = Viewmodel.new(config)

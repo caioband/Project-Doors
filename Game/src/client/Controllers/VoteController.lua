@@ -15,6 +15,8 @@ local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 
+local TimerFormat = require(ReplicatedStorage.Shared.SharedModules.TimerFormat)
+
 local FILL_TWEEN = TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 -- Animacao da camera ao apontar para a porta selecionada.
 local CAMERA_TWEEN = TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -42,6 +44,7 @@ local VoteRemote: RemoteFunction
 local BroadcastVoteRemote: RemoteEvent
 local VotingStartedRemote: RemoteEvent
 local VotingResetRemote: RemoteEvent
+local VotingTimerRemote: RemoteEvent
 
 local VotingRoom: Model
 local Cam1: BasePart
@@ -50,6 +53,8 @@ local Cam1: BasePart
 local VoteGui: ScreenGui
 local ConfirmButton: GuiButton
 local BackButton: GuiButton
+-- TextLabel do cronometro da votacao (Vote.Timer), atualizado com o tempo restante do servidor.
+local TimerLabel: TextLabel
 
 -- Porta atualmente selecionada (aguardando Confirm). nil = nenhuma selecionada.
 local SelectedDoorIndex: number? = nil
@@ -150,6 +155,14 @@ end
 local function UpdateBillboards(counts: { number })
     for index, label in ipairs(DoorLabels) do
         label.Text = tostring(counts[index] or 0)
+    end
+end
+
+
+-- Atualiza o TextLabel do cronometro com o tempo restante (em segundos) formatado.
+local function UpdateTimer(remaining: number?)
+    if TimerLabel then
+        TimerLabel.Text = TimerFormat.Format(remaining)
     end
 end
 
@@ -309,13 +322,23 @@ function VoteController:EnterVoting(status)
     ResetChoices()
 
     -- Mostra a UI de votacao com o botao Confirm escondido ate o player escolher uma porta.
+    -- O Back so aparece para quem esta no modo de votacao.
     SelectedDoorIndex = nil
     ConfirmButton.Visible = false
+    BackButton.Visible = true
     VoteGui.Enabled = true
+    if TimerLabel then
+        TimerLabel.Visible = true
+    end
 
     -- Sincroniza a contagem atual de votos (mesmo com os billboards escondidos agora).
     if status and typeof(status.counts) == "table" then
         UpdateBillboards(status.counts)
+    end
+
+    -- Mostra imediatamente o tempo restante da votacao (para quem entra com ela em andamento).
+    if status and typeof(status.remaining) == "number" then
+        UpdateTimer(status.remaining)
     end
 
     if status and typeof(status.latestChoice) == "number" then
@@ -332,9 +355,10 @@ function VoteController:ExitVoting()
     IsVoting = false
     SelectedDoorIndex = nil
 
-    -- Esconde a UI de votacao (so e exibida durante o modo votacao).
-    VoteGui.Enabled = false
+    -- Sai do modo de votacao, mas mantem a Vote GUI habilitada para o Timer continuar visivel
+    -- a todos durante a votacao/carregamento. Esconde apenas os botoes do modo de votacao.
     ConfirmButton.Visible = false
+    BackButton.Visible = false
 
     -- Restaura a camera ao jogador e so entao retoma o loop do viewmodel (que espera a
     -- camera no tipo Custom), reexibindo o modelo/itens.
@@ -377,8 +401,69 @@ function VoteController:ResetVoting()
     VotingStarted = false
     HasVoted = false
     UpdateBillboards({})
+    UpdateTimer(0)
+    -- Volta ao lobby: esconde o Timer/Vote GUI ate a proxima votacao comecar.
+    if TimerLabel then
+        TimerLabel.Visible = false
+    end
+    VoteGui.Enabled = false
     RefreshBillboards()
     UpdatePromptState()
+end
+
+
+-- Define um texto de status no Timer (usado pelo MapController durante o carregamento do mapa:
+-- progresso do preload, "aguardando outros jogadores...", etc.). Garante o Timer visivel a todos.
+function VoteController:SetTimerText(text: string)
+    if not TimerLabel then
+        return
+    end
+    VoteGui.Enabled = true
+    TimerLabel.Visible = true
+    TimerLabel.Text = text
+end
+
+
+-- Cria um frame preto temporario cobrindo a tela e faz fade-in (escurece) seguido de fade-out
+-- (clareia). O servidor teleporta os players no meio (tela totalmente preta, apos o fade-in).
+function VoteController:PlayTransition(fadeIn: number?, fadeOut: number?)
+    local fadeInTime = tonumber(fadeIn) or 5
+    local fadeOutTime = tonumber(fadeOut) or 5
+
+    VoteGui.Enabled = true
+
+    -- Frame temporario centralizado cobrindo toda a tela.
+    local frame = Instance.new("Frame")
+    frame.Name = "Transition"
+    frame.AnchorPoint = Vector2.new(0.5, 0.5)
+    frame.Position = UDim2.fromScale(0.5, 0.5)
+    frame.Size = UDim2.fromScale(1, 1)
+    frame.BackgroundColor3 = Color3.new(0, 0, 0)
+    frame.BackgroundTransparency = 1
+    frame.BorderSizePixel = 0
+    frame.ZIndex = 100
+    frame.Parent = VoteGui
+
+    task.spawn(function()
+        -- Fade-in: tela escurece ate ficar totalmente preta.
+        TweenService:Create(frame, TweenInfo.new(fadeInTime, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut), {
+            BackgroundTransparency = 0,
+        }):Play()
+        task.wait(fadeInTime)
+
+        -- Nesse ponto a tela esta preta e o servidor ja esta teleportando os players.
+        -- Fade-out: revela o mapa com os players ja posicionados.
+        TweenService:Create(frame, TweenInfo.new(fadeOutTime, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut), {
+            BackgroundTransparency = 1,
+        }):Play()
+        task.wait(fadeOutTime)
+
+        frame:Destroy()
+        -- Rodada iniciada: esconde o Timer de status.
+        if TimerLabel then
+            TimerLabel.Visible = false
+        end
+    end)
 end
 
 
@@ -410,6 +495,7 @@ function VoteController:Start()
     BroadcastVoteRemote = votationFolder:WaitForChild("BroadcastVote")
     VotingStartedRemote = votationFolder:WaitForChild("VotingStarted")
     VotingResetRemote = votationFolder:WaitForChild("VotingReset")
+    VotingTimerRemote = votationFolder:WaitForChild("VotingTimer")
 
     local mapInUse = Workspace:WaitForChild("MapInUse")
     VotingRoom = mapInUse:WaitForChild("VotingRoom")
@@ -443,8 +529,12 @@ function VoteController:Start()
     VoteGui = PlayerGui:WaitForChild("Vote")
     ConfirmButton = VoteGui:WaitForChild("Confirm")
     BackButton = VoteGui:WaitForChild("Back")
+    TimerLabel = VoteGui:WaitForChild("Timer") :: TextLabel
     VoteGui.Enabled = false
     ConfirmButton.Visible = false
+    BackButton.Visible = false
+    TimerLabel.Visible = false
+    UpdateTimer(0)
 
     -- Confirm: confirma o voto na porta selecionada. Back: sai sem votar.
     ConfirmButton.Activated:Connect(function()
@@ -488,13 +578,30 @@ function VoteController:Start()
         end
     end)
 
-    -- A votacao da rodada foi iniciada por algum player: libera os billboards de contagem.
+    -- A votacao da rodada foi iniciada por algum player: libera os billboards de contagem e
+    -- mostra o Timer para TODOS os players (mesmo quem nao esta no modo de votacao). Os botoes
+    -- Confirm/Back permanecem escondidos para quem nao esta votando.
     VotingStartedRemote.OnClientEvent:Connect(function(counts)
         VotingStarted = true
         if typeof(counts) == "table" then
             UpdateBillboards(counts)
         end
+        VoteGui.Enabled = true
+        if not IsVoting then
+            ConfirmButton.Visible = false
+            BackButton.Visible = false
+        end
+        TimerLabel.Visible = true
         RefreshBillboards()
+    end)
+
+    -- Tick do cronometro vindo do servidor: atualiza o label com o tempo restante formatado.
+    -- Ao chegar a zero, fecha o modo de votacao caso o player ainda esteja votando.
+    VotingTimerRemote.OnClientEvent:Connect(function(remaining)
+        UpdateTimer(remaining)
+        if typeof(remaining) == "number" and remaining <= 0 and IsVoting then
+            self:ExitVoting()
+        end
     end)
 
     -- Servidor resetou a votacao (nova rodada): volta tudo ao estado inicial.

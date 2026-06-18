@@ -28,6 +28,9 @@ export type ViewmodelConfig = {
 	DefaultFOV: number?,
 	SprintFOV: number?,
 	FOVTransitionSpeed: number?,
+	-- Offset estático aplicado à câmera (primeira pessoa) em relação à orientação dela.
+	-- Aceita CFrame ou Vector3 (posição). Ver :SetCameraOffset.
+	CameraOffset: (CFrame | Vector3)?,
 }
 
 local DEFAULT_CONFIG: ViewmodelConfig = {
@@ -47,6 +50,7 @@ local DEFAULT_CONFIG: ViewmodelConfig = {
 	DefaultFOV = 70,
 	SprintFOV = 80,
 	FOVTransitionSpeed = 5,
+	CameraOffset = CFrame.new(),
 }
 
 function Viewmodel.new(config: ViewmodelConfig?)
@@ -69,6 +73,10 @@ function Viewmodel.new(config: ViewmodelConfig?)
 	self.ViewmodelModel = nil
 	-- Offset aplicado à root do viewmodel em relação à câmera (ver :SetViewmodelOffset)
 	self.ViewmodelOffset = CFrame.new()
+	-- Offset estático aplicado à câmera em relação à orientação dela (ver :SetCameraOffset).
+	-- Inicializado a partir da config (CameraOffset), aceitando CFrame ou Vector3.
+	self.CameraOffset = CFrame.new()
+	self:SetCameraOffset(self.Config.CameraOffset)
 
 	self.IsRunning = false
 	self.IsPaused = false
@@ -266,7 +274,9 @@ function Viewmodel:_update(deltaTime: number)
 	-- "stuck" by Humanoid.CameraOffset being reset on humanoid state changes (e.g. sprint toggles).
 	local bobCFrame = CFrame.new(bobOffset) * CFrame.Angles(bobRotation.X, bobRotation.Y, bobRotation.Z)
 	local swayCFrame = CFrame.Angles(swayRotation.X, swayRotation.Y, swayRotation.Z)
-	self.Camera.CFrame = self.Camera.CFrame * bobCFrame * swayCFrame
+	-- O CameraOffset (estático, vindo da config) é aplicado por último, em espaço local da câmera,
+	-- depois do head bob/sway. O viewmodel segue self.Camera.CFrame, então herda esse offset.
+	self.Camera.CFrame = self.Camera.CFrame * bobCFrame * swayCFrame * self.CameraOffset
 
 	-- Acompanha o viewmodel clonado com a câmera e aplica o sway (da config) ao modelo.
 	-- A câmera já inclui bob/sway, então o modelo herda esse movimento por seguir a câmera;
@@ -542,6 +552,19 @@ function Viewmodel:SetViewmodelOffset(offset: CFrame | Vector3)
 		self.ViewmodelOffset = CFrame.new(offset)
 	else
 		self.ViewmodelOffset = offset
+	end
+end
+
+-- Define o offset estático da câmera em relação à orientação dela (primeira pessoa).
+-- Aceita uma CFrame, ou um Vector3/posição convertida para CFrame.new(...). Valores invalidos/nil
+-- viram CFrame.new() (sem offset). Aplicado todo frame no :_update, após o head bob/sway.
+function Viewmodel:SetCameraOffset(offset: (CFrame | Vector3)?)
+	if typeof(offset) == "Vector3" then
+		self.CameraOffset = CFrame.new(offset)
+	elseif typeof(offset) == "CFrame" then
+		self.CameraOffset = offset
+	else
+		self.CameraOffset = CFrame.new()
 	end
 end
 

@@ -76,7 +76,7 @@ local function registerItemCallbacks()
             viewmodel:AttachItemToRightArm(ReplicatedStorage.Assets.Models.Items.Flashlight)
             viewmodel:CloneAnimsFolder("Flashlight")
             viewmodel:LoadViewmodelAnims()
-            viewmodel:SetViewmodelOffset(Vector3.new(3, 0, 0))
+            viewmodel:SetViewmodelOffset(Vector3.new(3, -2, 0))
             playFlashlightAnims(viewmodel)
         end,
 
