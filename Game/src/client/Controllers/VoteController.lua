@@ -426,7 +426,9 @@ end
 
 -- Cria um frame preto temporario cobrindo a tela e faz fade-in (escurece) seguido de fade-out
 -- (clareia). O servidor teleporta os players no meio (tela totalmente preta, apos o fade-in).
-function VoteController:PlayTransition(fadeIn: number?, fadeOut: number?)
+-- onFadeInComplete: callback disparado quando a tela esta totalmente preta (fade-in completo,
+-- antes do fade-out). E rodado em uma thread propria para NAO yieldar/atrasar o fade-out.
+function VoteController:PlayTransition(fadeIn: number?, fadeOut: number?, onFadeInComplete: (() -> ())?)
     local fadeInTime = tonumber(fadeIn) or 5
     local fadeOutTime = tonumber(fadeOut) or 5
 
@@ -444,12 +446,22 @@ function VoteController:PlayTransition(fadeIn: number?, fadeOut: number?)
     frame.ZIndex = 100
     frame.Parent = VoteGui
 
+    -- Ao iniciar o fade-in, esconde imediatamente o texto de progresso de carregamento (Vote.Timer).
+    if TimerLabel then
+        TimerLabel.Visible = false
+    end
+
     task.spawn(function()
         -- Fade-in: tela escurece ate ficar totalmente preta.
         TweenService:Create(frame, TweenInfo.new(fadeInTime, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut), {
             BackgroundTransparency = 0,
         }):Play()
         task.wait(fadeInTime)
+
+        -- Tela totalmente preta (fade-in completo): dispara o callback SEM yieldar o fade-out.
+        if onFadeInComplete then
+            task.spawn(onFadeInComplete)
+        end
 
         -- Nesse ponto a tela esta preta e o servidor ja esta teleportando os players.
         -- Fade-out: revela o mapa com os players ja posicionados.
@@ -459,10 +471,6 @@ function VoteController:PlayTransition(fadeIn: number?, fadeOut: number?)
         task.wait(fadeOutTime)
 
         frame:Destroy()
-        -- Rodada iniciada: esconde o Timer de status.
-        if TimerLabel then
-            TimerLabel.Visible = false
-        end
     end)
 end
 

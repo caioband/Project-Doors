@@ -2,7 +2,7 @@
 -- RoundService
 -- Orquestra o ciclo de rodada e o carregamento de mapas:
 --   * Clona um mapa de ServerStorage.Assets.Models.Maps para o slot Workspace.MapInUse.ActiveMap
---   * Sincroniza com os clientes via Comms.Round (MapLoaded / MapReady / RoundState)
+--   * Sincroniza com os clientes via Comms.Round (MapLoaded / MapReady / RoundState / StartTransition / RoundTimer)
 --   * Espera TODOS os players confirmarem (barreira de prontidao) antes de rodar o comportamento
 --     server do mapa, garantindo que o behavior so executa quando o mapa esta carregado para todos
 --   * Resolve o comportamento de cada mapa por nome em Services.MapBehaviors.<NomeDoMapa>
@@ -27,8 +27,10 @@ local READY_TIMEOUT = 120
 -- servidor teleporta os players. O cliente faz fade-in + fade-out (total = soma dos dois).
 local TRANSITION_FADE_IN = 5
 local TRANSITION_FADE_OUT = 5
--- Duracao (s) de fallback da rodada ativa caso o comportamento do mapa nao sinalize fim.
-local ROUND_DURATION = 120
+-- Duracao (s) da rodada ativa (5 minutos). O servidor conta esse tempo e replica o restante
+-- para os clientes a cada segundo (RoundTimer), que atualizam o Timer da GeneralUis. Ao zerar,
+-- o mapa NAO e descarregado (o comportamento pos-rodada sera implementado depois).
+local ROUND_DURATION = 300
 -- Nome do mapa usado quando nao ha mapeamento especifico para a porta vencedora.
 local DEFAULT_MAP = "Office"
 
@@ -67,6 +69,7 @@ local MapLoadedRemote: RemoteEvent
 local MapReadyRemote: RemoteEvent
 local RoundStateRemote: RemoteEvent
 local StartTransitionRemote: RemoteEvent
+local RoundTimerRemote: RemoteEvent
 
 
 -- Garante a hierarquia ReplicatedStorage.Comms.Round e os Remotes necessarios.
@@ -111,6 +114,13 @@ local function EnsureRemotes()
         StartTransitionRemote = Instance.new("RemoteEvent")
         StartTransitionRemote.Name = "StartTransition"
         StartTransitionRemote.Parent = roundFolder
+    end
+
+    RoundTimerRemote = roundFolder:FindFirstChild("RoundTimer") :: RemoteEvent
+    if not RoundTimerRemote then
+        RoundTimerRemote = Instance.new("RemoteEvent")
+        RoundTimerRemote.Name = "RoundTimer"
+        RoundTimerRemote.Parent = roundFolder
     end
 end
 
@@ -341,6 +351,29 @@ local function OnMapReady(player: Player, loadId: any)
 end
 
 
+-- Geracao do timer da rodada: incrementada para invalidar contagens anteriores.
+local RoundTimerGeneration = 0
+
+-- Conduz a contagem regressiva da rodada (ROUND_DURATION s), transmitindo o tempo restante a
+-- cada segundo para os clientes (que atualizam o Timer da GeneralUis). Bloqueia ate o cronometro
+-- chegar a zero. Ao zerar, NAO descarrega o mapa: o comportamento pos-rodada sera implementado
+-- depois. Aborta se o mapa for trocado/descarregado (LoadId/CurrentMap mudarem).
+local function RunRoundTimer(loadId: number)
+    RoundTimerGeneration += 1
+    local generation = RoundTimerGeneration
+    local endsAt = os.clock() + ROUND_DURATION
+
+    while generation == RoundTimerGeneration and LoadId == loadId and CurrentMap do
+        local remaining = math.max(0, math.ceil(endsAt - os.clock()))
+        RoundTimerRemote:FireAllClients(remaining)
+        if remaining <= 0 then
+            break
+        end
+        task.wait(1)
+    end
+end
+
+
 -- Loop principal da rodada: Lobby (votacao) -> Carregar mapa -> Rodada -> Descarregar.
 function RoundService:RunRoundLoop()
     local VoteService = self.GetService("VoteService")
@@ -377,19 +410,13 @@ function RoundService:RunRoundLoop()
         self:LoadMap(mapName)
         SetRoundState("Active")
 
-        -- Aguarda o fim da rodada. Comportamentos podem encurtar via attribute "RoundOver"
-        -- no Map (setado pelo behavior server quando a rodada termina).
-        local roundStart = os.clock()
-        while CurrentMap and os.clock() - roundStart < ROUND_DURATION do
-            if CurrentMap:GetAttribute("RoundOver") == true then
-                break
-            end
-            task.wait(0.5)
-        end
+        -- Conta os 5 minutos da rodada, replicando o tempo restante para os clientes (que
+        -- atualizam o Timer da GeneralUis). Bloqueia ate o cronometro chegar a zero.
+        RunRoundTimer(LoadId)
 
-        -- Fase Ended: descarrega e volta ao Lobby.
-        SetRoundState("Ended")
-        self:UnloadMap()
+        -- Timer chegou a zero: por enquanto o mapa permanece carregado e a rodada nao recicla.
+        -- TODO(pos-rodada): tratar o fim do timer aqui (descarregar mapa, nova votacao, etc.).
+        break
     end
 end
 

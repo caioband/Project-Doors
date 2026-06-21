@@ -6,6 +6,7 @@ realm = "shared"
 registry = "https://github.com/UpliftGames/wally-index"
 
 [dependencies]
-ezvisualz = "arxkdev/ezvisualz@0.0.6"
+ezvisualz = "arxkdev/ezvisualz@1.2.0"
 promise = "evaera/promise@4.0.0"
 cmdr = "evaera/cmdr@1.12.0"
+twinkle = "caioband/twinkle@0.0.9"

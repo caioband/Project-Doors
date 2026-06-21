@@ -199,8 +199,15 @@ function MapController:Start()
         end
         local getController = MapController.GetController
         local voteController = getController and getController("VoteController")
+        local roundController = getController and getController("RoundController")
         if voteController and voteController.PlayTransition then
-            voteController:PlayTransition(fadeIn, fadeOut)
+            voteController:PlayTransition(fadeIn, fadeOut, function()
+                -- Tela totalmente preta (fade-in completo, antes do fade-out): mostra a UI de
+                -- inicio de rodada na GeneralUis (mensagem com efeito Jitter + Timer).
+                if roundController and roundController.PlayRoundStartUI then
+                    roundController:PlayRoundStartUI()
+                end
+            end)
         end
     end)
 end

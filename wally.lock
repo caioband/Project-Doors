@@ -4,13 +4,18 @@ registry = "test"
 
 [[package]]
 name = "arxkdev/ezvisualz"
-version = "0.0.6"
+version = "1.2.0"
 dependencies = []
 
 [[package]]
 name = "caio/project-doors"
 version = "0.1.0"
-dependencies = [["cmdr", "evaera/cmdr@1.12.0"], ["ezvisualz", "arxkdev/ezvisualz@0.0.6"], ["promise", "evaera/promise@4.0.0"]]
+dependencies = [["cmdr", "evaera/cmdr@1.12.0"], ["ezvisualz", "arxkdev/ezvisualz@1.2.0"], ["promise", "evaera/promise@4.0.0"], ["twinkle", "caioband/twinkle@0.0.9"]]
+
+[[package]]
+name = "caioband/twinkle"
+version = "0.0.9"
+dependencies = [["ezvisualz", "arxkdev/ezvisualz@1.2.0"], ["trove", "sleitnick/trove@1.8.0"]]
 
 [[package]]
 name = "evaera/cmdr"
@@ -20,4 +25,9 @@ dependencies = []
 [[package]]
 name = "evaera/promise"
 version = "4.0.0"
+dependencies = []
+
+[[package]]
+name = "sleitnick/trove"
+version = "1.8.0"
 dependencies = []
