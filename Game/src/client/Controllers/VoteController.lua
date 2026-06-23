@@ -20,6 +20,8 @@ local TimerFormat = require(ReplicatedStorage.Shared.SharedModules.TimerFormat)
 local FILL_TWEEN = TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 -- Animacao da camera ao apontar para a porta selecionada.
 local CAMERA_TWEEN = TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+-- Fade-in de volume dos AudioPlayers de InitialSounds ao revelar o mapa (fade-out da tela).
+local INITIAL_SOUNDS_FADE = TweenInfo.new(1.5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
 local VoteController = {}
 
@@ -424,6 +426,36 @@ function VoteController:SetTimerText(text: string)
 end
 
 
+-- Toca os AudioPlayers de InitialSounds do mapa atual (Workspace.MapInUse.ActiveMap.InitialSounds)
+-- ao revelar o mapa. Ignora os marcados com o atributo Ignore == true (ex.: trovoes, tocados sob
+-- demanda pelo behavior do mapa). Cada um comeca com Volume 0, da Play e faz tween ate o volume alvo
+-- (atributo TargetVolume, ou o Volume ja configurado no Studio; minimo 1 se nao houver).
+function VoteController:PlayInitialSounds(fade : number?)
+    local mapInUse = Workspace:FindFirstChild("MapInUse")
+    local activeMap = mapInUse and mapInUse:FindFirstChild("ActiveMap")
+    local folder = activeMap and activeMap:FindFirstChild("InitialSounds")
+    if not folder then
+        return
+    end
+
+    for _, descendant in ipairs(folder:GetDescendants()) do
+        if descendant:IsA("AudioPlayer") and descendant:GetAttribute("Ignore") ~= true then
+            local target = descendant:GetAttribute("TargetVolume")
+            if typeof(target) ~= "number" then
+                target = descendant.Volume
+            end
+            if target <= 0 then
+                target = 1
+            end
+
+            descendant.Volume = 0
+            descendant:Play()
+            TweenService:Create(descendant, TweenInfo.new(fade or 5, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Volume = target }):Play()
+        end
+    end
+end
+
+
 -- Cria um frame preto temporario cobrindo a tela e faz fade-in (escurece) seguido de fade-out
 -- (clareia). O servidor teleporta os players no meio (tela totalmente preta, apos o fade-in).
 -- onFadeInComplete: callback disparado quando a tela esta totalmente preta (fade-in completo,
@@ -464,10 +496,13 @@ function VoteController:PlayTransition(fadeIn: number?, fadeOut: number?, onFade
         end
 
         -- Nesse ponto a tela esta preta e o servidor ja esta teleportando os players.
+        -- Comecando a revelar o mapa: inicia os InitialSounds (rain etc.) com fade-in de volume.
+
         -- Fade-out: revela o mapa com os players ja posicionados.
         TweenService:Create(frame, TweenInfo.new(fadeOutTime, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut), {
             BackgroundTransparency = 1,
         }):Play()
+        self:PlayInitialSounds()
         task.wait(fadeOutTime)
 
         frame:Destroy()

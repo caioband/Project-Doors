@@ -26,6 +26,10 @@ local MAX_PASSWORD_ERRORS = 3
 -- Intervalo (s) entre cada digito da senha falada ao atender o telefone correto.
 local DIGIT_INTERVAL = 1
 
+-- Faixa (s) do intervalo aleatorio entre trovoes do ambiente de chuva (InitialSounds.Rain).
+local THUNDER_MIN_INTERVAL = 8
+local THUNDER_MAX_INTERVAL = 25
+
 -- Resolve um caminho aninhado a partir de uma instancia raiz (nil se algum no faltar).
 local function resolve(root: Instance?, ...: string): Instance?
     local current = root
@@ -40,6 +44,33 @@ end
 
 function Office.OnLoad(ctx)
     print(string.format("[Office:client] OnLoad (loadId=%d)", ctx.LoadId))
+
+    -- Ambiente de chuva: a cada intervalo aleatorio, toca um trovao (AudioPlayer "Thunder") de uma
+    -- Part aleatoria de ctx.Map.InitialSounds.Rain. Os Thunder tem Ignore=true, entao nao tocam no
+    -- fade-out inicial (VoteController:PlayInitialSounds) como os demais InitialSounds. O loop para
+    -- sozinho quando o mapa e descarregado (ctx.Map.Parent vira nil).
+    local rainFolder = resolve(ctx.Map, "InitialSounds", "Rain")
+    if rainFolder then
+        local thunders: { AudioPlayer } = {}
+        for _, part in rainFolder:GetChildren() do
+            local thunder = part:FindFirstChild("Thunder")
+            if thunder and thunder:IsA("AudioPlayer") then
+                table.insert(thunders, thunder)
+            end
+        end
+
+        if #thunders > 0 then
+            task.spawn(function()
+                while ctx.Map.Parent do
+                    task.wait(math.random(THUNDER_MIN_INTERVAL, THUNDER_MAX_INTERVAL))
+                    if not ctx.Map.Parent then
+                        break
+                    end
+                    thunders[math.random(#thunders)]:Play()
+                end
+            end)
+        end
+    end
 
     local managerPC = resolve(ctx.Map, "Model", "ManagerPC")
     if not managerPC then
@@ -104,6 +135,31 @@ function Office.OnLoad(ctx)
     local failed = false         -- jogador esgotou as tentativas
     local unlocked = false       -- jogador acertou a senha
 
+    -- Bloqueio de digitacao enquanto qualquer animacao/efeito do monitor estiver rodando. E um
+    -- contador (beginBusy/endBusy se aninham): o TextBox so volta a aceitar texto quando o contador
+    -- zera e o puzzle nao foi resolvido/falhado. Comeca desabilitado ate a intro liberar.
+    local busyCount = 0
+    local function setTextBoxEnabled(enabled: boolean)
+        textBox.TextEditable = enabled
+        textBox.Selectable = enabled
+        if not enabled then
+            textBox:ReleaseFocus()
+        end
+    end
+    local function beginBusy()
+        busyCount += 1
+        if busyCount == 1 then
+            setTextBoxEnabled(false)
+        end
+    end
+    local function endBusy()
+        busyCount = math.max(0, busyCount - 1)
+        if busyCount == 0 and not failed and not unlocked then
+            setTextBoxEnabled(true)
+        end
+    end
+    setTextBoxEnabled(false)
+
     -- Botao "Back" da GeneralUis: aparece ao abrir o monitor e, ao ser clicado, devolve o
     -- jogador ao estado anterior (camera/mouse/viewmodel). Comeca escondido.
     local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
@@ -119,6 +175,22 @@ function Office.OnLoad(ctx)
                 child:Destroy()
             end
         end
+    end
+
+    -- Anima um texto no Warning com o efeito "Glitch" (mesmo padrao da intro): esconde o label,
+    -- toca o efeito e, ao terminar, limpa os char labels e restaura o Warning ja com o texto final.
+    local function showWarningGlitch(text: string, onComplete: (() -> ())?)
+        UIAnimator.ShowText(container, warning, text, {
+            effect = "Glitch",
+            onComplete = function()
+                clearCharLabels()
+                warning.Text = text
+                warning.Visible = true
+                if onComplete then
+                    onComplete()
+                end
+            end,
+        })
     end
 
     -- Sai do monitor e restaura o estado anterior ao acionamento do prompt: devolve a camera ao
@@ -209,7 +281,9 @@ function Office.OnLoad(ctx)
     -- Avanca o progresso de erro do puzzle (n/total): deixa o TextBox/Warning mais transparentes
     -- e o Container mais preto; ao esgotar as tentativas (transparencia 1 / container preto)
     -- dispara a sequencia de falha. Usado tanto pela senha errada quanto pelo timeout do telefone.
-    local function addPuzzleError()
+    -- Se ainda houver tentativas: roda `onRetry` (se passado) para o feedback do erro, ou apenas
+    -- recomeça o loop dos telefones (timeout).
+    local function addPuzzleError(onRetry: (() -> ())?)
         if failed then
             return
         end
@@ -229,23 +303,61 @@ function Office.OnLoad(ctx)
             fireOfficeServer("StopPhones")
             task.wait(2)
             task.spawn(playFailure)
+        elseif onRetry then
+            -- Errou mas ainda tem tentativas: roda o feedback do erro (que ao final recomeça o loop).
+            task.spawn(onRetry)
         else
-            -- Errou mas ainda tem tentativas: recomeça o loop (o server sorteia novos telefones).
+            -- Errou mas ainda tem tentativas (timeout): recomeça o loop (o server sorteia novos telefones).
             fireOfficeServer("RestartPhonePuzzle")
         end
     end
 
-    -- Senha digitada errada: treme e contabiliza um erro do puzzle.
+    -- Feedback ao errar a senha mas ainda ter tentativas: para imediatamente o telefone que esta
+    -- tocando, espera a tremida (animacao de erro) assentar e entao anima no Warning, com efeito
+    -- Glitch, "Incorrect password", depois (1s) "You have N more attempts" (N = tentativas
+    -- restantes) e por fim o texto original "Pick the next call"; ao terminar, recomeça o loop dos
+    -- telefones no server. Yielda (roda em sua propria thread via task.spawn no addPuzzleError).
+    local function playRetryFeedback()
+        fireOfficeServer("StopPhones")
+
+        local remaining = MAX_PASSWORD_ERRORS - errorCount
+        local attemptsText = string.format(
+            "You have %d more attempt%s",
+            remaining,
+            if remaining == 1 then "" else "s"
+        )
+
+        -- Espera a animacao de erro (tremida) assentar antes de reescrever o Warning.
+        task.wait(1)
+        showWarningGlitch("Incorrect password", function()
+            task.wait(1)
+            showWarningGlitch(attemptsText, function()
+                task.wait(1)
+                showWarningGlitch("Pick the next call", function()
+                    fireOfficeServer("RestartPhonePuzzle")
+                    -- Fim da sequencia de feedback: libera o TextBox para a proxima tentativa.
+                    endBusy()
+                end)
+            end)
+        end)
+    end
+
+    -- Senha digitada errada: treme e contabiliza um erro do puzzle (com feedback de retentativa).
+    -- Marca o monitor como ocupado durante toda a sequencia (tremida + glitches), bloqueando a
+    -- digitacao; o endBusy correspondente roda no fim de playRetryFeedback.
     local function onWrongPassword()
         if failed then
             return
         end
+        beginBusy()
         shakeOnWrongPassword()
-        addPuzzleError()
+        addPuzzleError(playRetryFeedback)
     end
 
-    -- Senha digitada correta: deixa o texto do TextBox e do Warning verdes.
+    -- Senha digitada correta: deixa o texto do TextBox e do Warning verdes. Puzzle resolvido, entao
+    -- o TextBox fica desabilitado de vez (nao ha mais o que digitar).
     local function onCorrectPassword()
+        setTextBoxEnabled(false)
         local green = Color3.fromRGB(0, 255, 0)
         spr.target(textBox, 1, 2.5, { TextColor3 = green })
         spr.target(warning, 1, 2.5, { TextColor3 = green })
@@ -389,6 +501,9 @@ function Office.OnLoad(ctx)
         end
         introPlayed = true
 
+        -- Toda a intro (crescimento + glitch) bloqueia a digitacao; libera ao terminar.
+        beginBusy()
+
         -- Com a camera ja posicionada, cresce o TextBox em Y.Scale ate .3 com um spring.
         task.wait(1)
         local size = textBox.Size
@@ -396,21 +511,14 @@ function Office.OnLoad(ctx)
             Size = UDim2.new(size.X.Scale, size.X.Offset, 0.3, 0),
         })
 
-        -- Quando a animacao de crescimento terminar, escreve o aviso com o efeito "Glitch".
+        -- Quando a animacao de crescimento terminar, escreve o aviso com o efeito "Glitch" e, ao
+        -- terminar, pede ao server para iniciar o puzzle dos telefones e libera o TextBox.
         spr.completed(textBox, function()
             task.wait(.5)
-            UIAnimator.ShowText(container, warning, "Pick the next call", {
-                effect = "Glitch",
-                onComplete = function()
-                    -- Acabou a animacao: remove os labels de caractere e devolve a visibilidade.
-                    clearCharLabels()
-                    warning.Text = "Pick the next call"
-                    warning.Visible = true
-
-                    -- "Pick the next call": pede ao server para iniciar o puzzle dos telefones.
-                    startPhonePuzzleOnServer()
-                end,
-            })
+            showWarningGlitch("Pick the next call", function()
+                startPhonePuzzleOnServer()
+                endBusy()
+            end)
         end)
     end)
 end

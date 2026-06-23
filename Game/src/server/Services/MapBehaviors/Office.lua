@@ -7,7 +7,9 @@
 --   * Quando o cliente sinaliza o fim da animacao do monitor (StartPhonePuzzle), liga 1 ou 2
 --     telefones aleatorios de ctx.Map.Phones. Com 2, um e a ligacao verdadeira e o outro a falsa.
 --   * Telefones selecionados: ProximityPrompt.Enabled = true, BillboardGui.Enabled = true e o
---     som Ring tocando (no server -> replica para todos). 30s para atender; senao, +1 erro.
+--     RingPlayer (AudioPlayer) tocando (no server -> replica para todos). 30s para atender; senao,
+--     +1 erro. Cada RingPlayer esta ligado por Wire a um RingEmitter (AudioEmitter, grupo "General"):
+--     os clientes ouvem via AudioListener na Head do personagem (ver AudioListenerController).
 --   * Atender (acionar o ProximityPrompt) silencia o telefone e toca o Pick SO para quem atendeu.
 --     Se for o verdadeiro: desliga todos os telefones e fala a senha SO para o atendente.
 --   * A cada erro (senha errada / timeout) o cliente pede RestartPhonePuzzle: os telefones param
@@ -132,17 +134,17 @@ function Office.OnLoad(ctx)
         end
     end
 
-    -- Silencia/desativa um telefone: para o Ring, esconde o Billboard e desliga o Prompt.
+    -- Silencia/desativa um telefone: para o RingPlayer, esconde o Billboard e desliga o Prompt.
     local function silencePhone(phone: Instance)
         local base = phone:FindFirstChild("Base")
         if not base then
             return
         end
-        local ring = base:FindFirstChild("Ring")
+        local ringPlayer = base:FindFirstChild("RingPlayer")
         local billboard = base:FindFirstChild("BillboardGui")
         local prompt = base:FindFirstChild("ProximityPrompt")
-        if ring and ring:IsA("Sound") then
-            ring:Stop()
+        if ringPlayer and ringPlayer:IsA("AudioPlayer") then
+            ringPlayer:Stop()
         end
         if billboard then
             billboard.Enabled = false
@@ -211,14 +213,14 @@ function Office.OnLoad(ctx)
             local base = phone:FindFirstChild("Base")
             if base then
                 local billboard = base:FindFirstChild("BillboardGui")
-                local ring = base:FindFirstChild("Ring")
+                local ringPlayer = base:FindFirstChild("RingPlayer")
                 local prompt = base:FindFirstChild("ProximityPrompt")
                 if billboard then
                     billboard.Enabled = true
                 end
-                if ring and ring:IsA("Sound") then
-                    ring.Looped = true -- mantem tocando ate ser atendido/silenciado
-                    ring:Play()
+                if ringPlayer and ringPlayer:IsA("AudioPlayer") then
+                    ringPlayer.Looping = true -- mantem tocando ate ser atendido/silenciado
+                    ringPlayer:Play()
                 end
                 if prompt then
                     prompt.Enabled = true
@@ -257,12 +259,12 @@ function Office.OnLoad(ctx)
         local rung = {}
         for i = 1, count do
             local base = pool[i]:FindFirstChild("Base")
-            local ring = base and base:FindFirstChild("Ring")
-            if ring and ring:IsA("Sound") then
+            local ringPlayer = base and base:FindFirstChild("RingPlayer")
+            if ringPlayer and ringPlayer:IsA("AudioPlayer") then
                 task.wait(math.random(0, 1))
-                ring.Looped = true
-                ring:Play()
-                table.insert(rung, ring)
+                ringPlayer.Looping = true
+                ringPlayer:Play()
+                table.insert(rung, ringPlayer)
             end
         end
 
@@ -270,9 +272,9 @@ function Office.OnLoad(ctx)
             if myToken ~= failureRingToken then
                 return
             end
-            for _, ring in ipairs(rung) do
-                if ring.Parent then
-                    ring:Stop()
+            for _, ringPlayer in ipairs(rung) do
+                if ringPlayer.Parent then
+                    ringPlayer:Stop()
                 end
             end
         end)
