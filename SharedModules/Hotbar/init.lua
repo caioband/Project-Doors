@@ -87,32 +87,49 @@ local function getBindIcon(slotInfo)
     return BindFallbacks[keyCode]
 end
 
-local function bindSlots(hotbar)
-    for slotNumber in pairs(hotbar.Slots) do
-        ContextActionService:UnbindAction("HotbarSlot" .. slotNumber)
+-- Alterna o estado do slot (equipa se livre, desequipa se ja equipado).
+local function toggleSlot(hotbar, slotNumber: number)
+    local slot = hotbar.Slots[slotNumber]
+    if slot and slot.Equipped then
+        hotbar:Unequip(slotNumber)
+    else
+        hotbar:Equip(slotNumber)
     end
+end
 
+-- Reconfigura toda a hotbar para o dispositivo atual:
+-- - alterna entre o layout padrao (Desktop/anel) e o de toque (Mobile);
+-- - renderiza cada slot (item, destaque, bind) no layout ativo;
+-- - em telas de toque ativa o ImageButton do slot; nos demais vincula a tecla/controle.
+local function refreshSlots(hotbar)
     local device = DeviceController:GetDevice()
+    -- Usamos TouchEnabled (e nao device == "Mobile") porque o emulador do Studio e aparelhos
+    -- hibridos reportam KeyboardEnabled = true, o que faria o DeviceController classificar
+    -- como "PC" e deixaria a hotbar de toque desativada mesmo com toque disponivel.
+    local isTouch = UserInputService.TouchEnabled
+
+    -- Mostra a hotbar de toque quando ha tela sensivel ao toque; senao, a padrao.
+    UI:SetActiveLayout(isTouch)
 
     for slotNumber, slotInfo in pairs(hotbar.Slots) do
+        ContextActionService:UnbindAction("HotbarSlot" .. slotNumber)
+
+        -- No layout de toque o proprio botao e o acionador, entao nao mostramos glifo de bind.
+        local bind = (not isTouch) and getBindIcon(slotInfo) or nil
+        local itemName = slotInfo.Current and slotInfo.Current.Name or nil
+
+        UI:RenderSlot(slotNumber, itemName, slotInfo.Equipped, bind, isTouch, function()
+            toggleSlot(hotbar, slotNumber)
+        end)
+
         local keyCode = slotInfo.Binds[device]
         if not keyCode then continue end
-
-        -- Mantem o icone do bind atualizado para slots ocupados (ex: ao trocar de dispositivo).
-        if slotInfo.Current then
-            UI:SetBindIcon(slotNumber, getBindIcon(slotInfo))
-        end
 
         ContextActionService:BindAction(
             "HotbarSlot" .. slotNumber,
             function(_, inputState)
                 if inputState == Enum.UserInputState.Begin then
-                    local slot = hotbar.Slots[slotNumber]
-                    if slot and slot.Equipped then
-                        hotbar:Unequip(slotNumber)
-                    else
-                        hotbar:Equip(slotNumber)
-                    end
+                    toggleSlot(hotbar, slotNumber)
                 end
                 return Enum.ContextActionResult.Pass
             end,
@@ -124,10 +141,10 @@ end
 
 function Hotbar:Start()
     UI:Render()
-    bindSlots(self)
+    refreshSlots(self)
 
     UserInputService.LastInputTypeChanged:Connect(function()
-        bindSlots(self)
+        refreshSlots(self)
     end)
 end
 
@@ -191,7 +208,7 @@ function Hotbar:AddToFirstFreeSlot(item): number?
     for slotNumber, slot in ipairs(self.Slots) do
         if slot.Current == nil then
             self:AddItem(slotNumber, item)
-            UI:AddSlot(slotNumber, getBindIcon(slot), item.Name)
+            refreshSlots(self)
             return slotNumber
         end
     end
@@ -212,6 +229,7 @@ function Hotbar:RemoveItem(slotNumber: number)
     end
 
     slot.Current = nil
+    refreshSlots(self)
     print("Removed item from slot " .. slotNumber)
 end
 

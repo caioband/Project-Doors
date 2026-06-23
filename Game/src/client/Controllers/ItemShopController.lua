@@ -45,18 +45,19 @@ local IsOpen = false
 local DistanceConnection: RBXScriptConnection? = nil
 
 
--- Confirma se o prompt acionado e o da mesa da VotingRoom.
+-- Confirma se o prompt acionado e o da loja da VotingRoom
+-- (VotingRoom.ItemShop.Shop.ProximityPrompt).
 -- Comparacao por ancestralidade, sobrevive a rotacao de mapas (MapInUse).
 local function IsVotingRoomPrompt(prompt: ProximityPrompt): boolean
-    local part = prompt.Parent
-    if not part or part.Name ~= "Part" then
+    local shop = prompt.Parent
+    if not shop or shop.Name ~= "Shop" then
         return false
     end
-    local tablePart = part.Parent
-    if not tablePart or tablePart.Name ~= "table" then
+    local itemShop = shop.Parent
+    if not itemShop or itemShop.Name ~= "ItemShop" then
         return false
     end
-    local votingRoom = tablePart.Parent
+    local votingRoom = itemShop.Parent
     return votingRoom ~= nil and votingRoom.Name == "VotingRoom"
 end
 

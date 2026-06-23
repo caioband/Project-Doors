@@ -7,12 +7,32 @@ local DeviceController = {
 }
 
 function DeviceController:DetectDevice()
-	if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then
+	-- Classifica pelo ULTIMO input usado, e nao apenas pelo que esta conectado. Isso resolve
+	-- o caso de teclado + controle conectados ao mesmo tempo: com a deteccao antiga, ter o
+	-- teclado conectado forcava "PC" e o slot mostrava o bind de teclado mesmo jogando no
+	-- controle. Prioridade efetiva: o que o player acabou de usar (Toque/Gamepad/Teclado-Mouse).
+	local lastInput = UserInputService:GetLastInputType()
+
+	if lastInput == Enum.UserInputType.Touch then
 		return "Mobile"
+	elseif string.match(lastInput.Name, "^Gamepad") then
+		return "Console"
+	elseif lastInput == Enum.UserInputType.Keyboard
+		or lastInput == Enum.UserInputType.MouseButton1
+		or lastInput == Enum.UserInputType.MouseButton2
+		or lastInput == Enum.UserInputType.MouseButton3
+		or lastInput == Enum.UserInputType.MouseMovement
+		or lastInput == Enum.UserInputType.MouseWheel then
+		return "PC"
 	end
 
-	if UserInputService.GamepadEnabled and not UserInputService.KeyboardEnabled then
+	-- Fallback por capacidade (ex.: antes do primeiro input). Mantem a prioridade Gamepad > teclado.
+	if UserInputService.GamepadEnabled then
 		return "Console"
+	end
+
+	if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then
+		return "Mobile"
 	end
 
 	return "PC"

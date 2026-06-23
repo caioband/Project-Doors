@@ -12,6 +12,7 @@ function ViewmodelController:Start()
 		EnableHeadBob = true,
 		EnableCameraSway = true,
 		BaseWalkSpeed = 8,
+		MaxWalkSpeed = 20,
 		HeadBobSpeed = 3,
 		HeadBobIntensity = 0.0001,
 		HeadBobRotationIntensity = 0.0005,

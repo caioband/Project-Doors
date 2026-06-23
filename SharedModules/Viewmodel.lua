@@ -15,6 +15,8 @@ export type ViewmodelConfig = {
 	EnableHeadBob: boolean?,
 	EnableCameraSway: boolean?,
 	BaseWalkSpeed: number?,
+	-- Velocidade na qual o FOV atinge o SprintFOV (usada para o FOV dinamico).
+	MaxWalkSpeed: number?,
 	HeadBobSpeed: number?,
 	HeadBobIntensity: number?,
 	HeadBobRotationIntensity: number?,
@@ -37,6 +39,7 @@ local DEFAULT_CONFIG: ViewmodelConfig = {
 	EnableHeadBob = true,
 	EnableCameraSway = true,
 	BaseWalkSpeed = 16,
+	MaxWalkSpeed = 20,
 	HeadBobSpeed = 10,
 	HeadBobIntensity = 0.05,
 	HeadBobRotationIntensity = 0.01,
@@ -253,8 +256,10 @@ function Viewmodel:_update(deltaTime: number)
 
 	-- Camera sway based on mouse movement (desativado enquanto o mouse estiver livre,
 	-- já que o cursor não está travado no centro e o delta não representa movimento de câmera)
+	-- O sway depende de GetMouseDelta, que em telas de toque reporta o movimento do dedo
+	-- (inclusive do thumbstick). So aplicamos quando ha um mouse real.
 	local swayRotation = Vector3.new(0, 0, 0)
-	if self.Config.EnableCameraSway and not self.FreeMouse then
+	if self.Config.EnableCameraSway and not self.FreeMouse and UserInputService.MouseEnabled then
 		local mouseDelta = UserInputService:GetMouseDelta()
 		local intensity = self.Config.SwayIntensity
 
@@ -306,8 +311,12 @@ function Viewmodel:_update(deltaTime: number)
 		end
 	end
 
-	-- Update FOV for sprint
-	local targetFOV = self.IsRunning and self.Config.SprintFOV or self.Config.DefaultFOV
+	-- FOV dinamico: interpola entre DefaultFOV (na velocidade base) e SprintFOV (na velocidade
+	-- maxima), acompanhando a velocidade real do player. Como a WalkSpeed varia com o quanto o
+	-- thumbstick esta esticado (mobile/console), o FOV passa a acompanhar essa variacao.
+	local fovRange = math.max((self.Config.MaxWalkSpeed :: number) - self.BaseWalkSpeed, 1e-3)
+	local fovRatio = math.clamp((speed - self.BaseWalkSpeed) / fovRange, 0, 1)
+	local targetFOV = self.Config.DefaultFOV + (self.Config.SprintFOV - self.Config.DefaultFOV) * fovRatio
 	self.CurrentFOV = self.CurrentFOV + (targetFOV - self.CurrentFOV) * self.Config.FOVTransitionSpeed * deltaTime
 	self.Camera.FieldOfView = self.CurrentFOV
 end
@@ -319,8 +328,14 @@ function Viewmodel:SetFirstPerson(enabled: boolean)
 		self.Player.CameraMaxZoomDistance = 0.5
 		self.Player.CameraMinZoomDistance = 0.5
 
-		UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
-		UserInputService.MouseIconEnabled = false
+		-- So travamos o mouse quando existe um mouse de fato. Em dispositivos de toque,
+		-- forcar LockCenter faz a camera padrao entrar em modo mouse-look e interpretar o
+		-- arrasto do thumbstick como movimento de mouse, girando a camera no eixo do movimento
+		-- (frente = olha pra cima, tras = pra baixo) ate ficar olhando pro teto/chao.
+		if UserInputService.MouseEnabled then
+			UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+			UserInputService.MouseIconEnabled = false
+		end
 	else
 		self.Player.CameraMaxZoomDistance = 128
 		self.Player.CameraMinZoomDistance = 0.5
@@ -338,9 +353,12 @@ function Viewmodel:SetFreeMouse(enabled: boolean)
 		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 		UserInputService.MouseIconEnabled = true
 	else
-		-- Volta a travar o mouse no centro (primeira pessoa)
-		UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
-		UserInputService.MouseIconEnabled = false
+		-- Volta a travar o mouse no centro (primeira pessoa), apenas quando ha um mouse real.
+		-- Em telas de toque manter MouseBehavior.Default evita o mouse-look fantasma do thumbstick.
+		if UserInputService.MouseEnabled then
+			UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+			UserInputService.MouseIconEnabled = false
+		end
 	end
 end
 

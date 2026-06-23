@@ -24,7 +24,10 @@ UIEffectCallbacks.Start()
 UIManager:Enable()
 Controls:Disable()
 
-local WalkSpeedValue = Humanoid.WalkSpeed
+-- A WalkSpeed nao e capturada/restaurada aqui: quem manda nela sao os controllers
+-- (SprintController/HumanoidController) que iniciam quando "Loaded" e setado. Capturar o
+-- valor agora pegaria o default do engine (16) e o restauraria por cima da base 8 do jogo.
+-- Durante o carregamento o movimento ja fica travado por Controls:Disable() + WalkSpeed = 0.
 local JumpPowerValue = Humanoid.JumpPower
 local JumpHeightValue = Humanoid.JumpHeight
 local AutoRotateValue = Humanoid.AutoRotate
@@ -59,7 +62,8 @@ Preloader.PreloadFinished:Connect(function()
         task.wait(0.1)
     end
     UIManager:LoadFinished()
-    Humanoid.WalkSpeed = WalkSpeedValue
+    -- A WalkSpeed e restaurada pelos controllers (base 8) ao iniciarem; aqui so devolvemos
+    -- o restante do movimento que foi congelado durante o carregamento.
     Humanoid.JumpPower = JumpPowerValue
     Humanoid.JumpHeight = JumpHeightValue
     Humanoid.AutoRotate = AutoRotateValue
