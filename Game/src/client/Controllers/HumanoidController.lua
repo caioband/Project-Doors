@@ -49,7 +49,7 @@ function HumanoidController:ApplyOverrides()
 end
 
 function HumanoidController:SetProperty(property: string, value: any)
-	print("Setting Humanoid property:", property, "to", value)
+	--print("Setting Humanoid property:", property, "to", value)
 	self.Overrides[property] = value
 
 	local humanoid = self.Humanoid

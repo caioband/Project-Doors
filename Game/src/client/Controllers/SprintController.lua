@@ -4,13 +4,11 @@ local ContextActionService = game:GetService("ContextActionService")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local DeviceController = require(ReplicatedStorage.Shared.SharedModules.DeviceController)
 
 local LocalPlayer = Players.LocalPlayer
-
--- A velocidade analogica (thumbstick) vale quando ha tela de toque ou um controle conectado.
-local function usesAnalogMovement(): boolean
-	return UserInputService.TouchEnabled or UserInputService.GamepadEnabled
-end
 local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 
 local ACTION_NAME = "Sprint"
@@ -22,25 +20,29 @@ export type SprintConfig = {
 	SprintSpeed: number,
 	-- Velocidade minima do modo analogico (thumbstick no minimo).
 	AnalogMinSpeed: number,
-	-- Abaixo dessa magnitude (0..1) o thumbstick e ignorado (velocidade minima).
-	AnalogDeadzone: number,
-	-- Curva de resposta do thumbstick. >1 deixa menos sensivel: e preciso esticar mais
-	-- para chegar perto da velocidade maxima (1 = linear).
-	AnalogResponseExponent: number,
+	-- Curva de resposta separada por plataforma: o thumbstick dinamico do mobile e o
+	-- analogico do controle nao tem o mesmo comportamento. Abaixo da Deadzone (0..1) o input
+	-- e ignorado; o Exponent (>1) deixa menos sensivel (precisa esticar mais para acelerar).
+	MobileDeadzone: number,
+	MobileResponseExponent: number,
+	ConsoleDeadzone: number,
+	ConsoleResponseExponent: number,
 }
 
 local DEFAULT_CONFIG: SprintConfig = {
 	WalkSpeed = 8,
 	SprintSpeed = 20,
 	AnalogMinSpeed = 0,
-	AnalogDeadzone = 0.1,
-	AnalogResponseExponent = 2.5,
+	MobileDeadzone = 0.1,
+	MobileResponseExponent = 3.5,
+	ConsoleDeadzone = 0.15,
+	ConsoleResponseExponent = 3.5,
 }
 
 local SprintController = {}
 
 -- Retorna o ControlModule do PlayerModule. O move vector dele tem magnitude analogica
--- (0..1) proporcional ao quanto o thumbstick esta esticado no mobile/console.
+-- (0..1) proporcional ao quanto o thumbstick dinamico do mobile esta esticado.
 local function getControls()
 	local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
 	local playerModule = playerScripts and playerScripts:FindFirstChild("PlayerModule")
@@ -87,6 +89,16 @@ function SprintController:Start()
 
 	ContextActionService:BindAction(ACTION_NAME, onSprintAction, false, Enum.KeyCode.LeftShift)
 
+	-- Console: acompanha a posicao crua do Thumbstick1 (analogico de verdade). Diferente do
+	-- mobile, aqui nao dependemos do move vector do ControlModule.
+	self.GamepadMoveMagnitude = 0
+	UserInputService.InputChanged:Connect(function(input: InputObject)
+		if input.KeyCode == Enum.KeyCode.Thumbstick1 then
+			local pos = input.Position
+			self.GamepadMoveMagnitude = math.min(math.sqrt(pos.X * pos.X + pos.Y * pos.Y), 1)
+		end
+	end)
+
 	-- Mobile/Console: a WalkSpeed varia conforme o quanto o thumbstick esta esticado.
 	RunService.Heartbeat:Connect(function()
 		self:_updateAnalogSpeed()
@@ -95,35 +107,54 @@ function SprintController:Start()
 	print("✓ SprintController initialized")
 end
 
--- Define a WalkSpeed proporcional a magnitude do thumbstick (toque/controle).
--- Sem toque nem controle nao faz nada: o sprint continua sendo a tecla (LeftShift).
+-- Ajusta a WalkSpeed a cada frame conforme o dispositivo atual: no PC respeita o bind
+-- (LeftShift); no Mobile/Console usa a magnitude do thumbstick (com curva por plataforma).
 function SprintController:_updateAnalogSpeed()
-	if not usesAnalogMovement() then
-		return
-	end
-
 	local humanoid = self.Humanoid
 	if not humanoid or humanoid.Health <= 0 then
 		return
 	end
 
-	if not self.Controls then
-		self.Controls = getControls()
-	end
-	local controls = self.Controls
-	if not controls then
+	-- O modo e escolhido pelo dispositivo atual (ultimo input), nao pelo que esta conectado.
+	-- Assim, no PC (teclado/mouse) o sprint continua no LeftShift mesmo com um controle plugado.
+	local device = DeviceController:GetDevice()
+
+	if device == "PC" then
+		-- Mantem a WalkSpeed coerente com o estado do bind (inclusive ao voltar de um modo
+		-- analogico que tenha deixado outro valor). So escreve quando muda.
+		local target = self.IsSprinting and self.Config.SprintSpeed or self.Config.WalkSpeed
+		if math.abs(humanoid.WalkSpeed - target) > 0.001 then
+			humanoid.WalkSpeed = target
+		end
 		return
 	end
 
-	local raw = math.clamp(controls:GetMoveVector().Magnitude, 0, 1)
+	-- A fonte da magnitude e a curva sao escolhidas por plataforma, pois o thumbstick
+	-- dinamico (mobile) e o analogico do controle (console) se comportam diferente.
+	local raw, deadzone, exponent
+	if device == "Mobile" then
+		-- Mobile: magnitude via move vector do thumbstick dinamico.
+		if not self.Controls then
+			self.Controls = getControls()
+		end
+		if not self.Controls then
+			return
+		end
+		raw = math.clamp(self.Controls:GetMoveVector().Magnitude, 0, 1)
+		deadzone = self.Config.MobileDeadzone
+		exponent = self.Config.MobileResponseExponent
+	else
+		-- Console: posicao crua do Thumbstick1.
+		raw = math.clamp(self.GamepadMoveMagnitude, 0, 1)
+		deadzone = self.Config.ConsoleDeadzone
+		exponent = self.Config.ConsoleResponseExponent
+	end
 
 	-- Deadzone + curva de resposta: evita que um toque leve no thumbstick ja jogue para a
 	-- velocidade maxima. Abaixo da deadzone -> 0; acima, reescala para 0..1 e aplica o expoente.
-	local deadzone = self.Config.AnalogDeadzone
 	local t = 0
 	if raw > deadzone then
-		t = (raw - deadzone) / (1 - deadzone)
-		t = t ^ self.Config.AnalogResponseExponent
+		t = ((raw - deadzone) / (1 - deadzone)) ^ exponent
 	end
 
 	-- t = 0 (parado) -> AnalogMinSpeed; t = 1 (esticado ao maximo) -> SprintSpeed.
@@ -152,8 +183,8 @@ function SprintController:SetSprinting(enabled: boolean)
 end
 
 function SprintController:IsRunning(): boolean
-	-- Com tecla reflete o estado do bind; com toque/controle reflete a velocidade analogica atual.
-	if not usesAnalogMovement() then
+	-- No PC reflete o estado do bind; no Mobile/Console reflete a velocidade analogica atual.
+	if DeviceController:GetDevice() == "PC" then
 		return self.IsSprinting
 	end
 

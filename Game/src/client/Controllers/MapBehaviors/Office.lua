@@ -43,7 +43,7 @@ local function resolve(root: Instance?, ...: string): Instance?
 end
 
 function Office.OnLoad(ctx)
-    print(string.format("[Office:client] OnLoad (loadId=%d)", ctx.LoadId))
+    --print(string.format("[Office:client] OnLoad (loadId=%d)", ctx.LoadId))
 
     -- Ambiente de chuva: a cada intervalo aleatorio, toca um trovao (AudioPlayer "Thunder") de uma
     -- Part aleatoria de ctx.Map.InitialSounds.Rain. Os Thunder tem Ignore=true, entao nao tocam no
@@ -524,7 +524,7 @@ function Office.OnLoad(ctx)
 end
 
 function Office.OnUnload(ctx)
-    print(string.format("[Office:client] OnUnload (loadId=%d)", ctx.LoadId))
+    --print(string.format("[Office:client] OnUnload (loadId=%d)", ctx.LoadId))
 
     -- Limpa todas as conexoes registradas para este mapa.
     ctx.Connections:DisconnectAll(ctx.Map)
