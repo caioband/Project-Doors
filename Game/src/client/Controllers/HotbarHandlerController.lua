@@ -1,11 +1,30 @@
 local HotbarHandler = {}
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
 local Hotbar = require(ReplicatedStorage.Shared.SharedModules.Hotbar)
+
+local LocalPlayer = Players.LocalPlayer
+
+-- Id da animacao (em loop) tocada no character ao equipar a Flashlight. Por ser tocada no
+-- character local, ela replica para os demais jogadores (que veem o modelo na mao direita).
+local FLASHLIGHT_ANIM_ID = "rbxassetid://135545662719950"
+
+-- Nome do modelo de flashlight que o servidor solda no character. O cliente do dono destroi
+-- a copia local (1a pessoa usa o viewmodel; nao deve enxergar o modelo do mundo).
+local EQUIPPED_FLASHLIGHT_NAME = "EquippedFlashlight"
 
 -- Estado da luz (Part + SpotLight) que acompanha a camera enquanto a Flashlight esta equipada.
 local flashlightPart: Part? = nil
 local flashlightConnection: RBXScriptConnection? = nil
+
+-- Track da animacao de flashlight no character e o watcher que destroi a copia local do modelo.
+local flashlightAnimTrack: AnimationTrack? = nil
+local equippedModelWatcher: RBXScriptConnection? = nil
+
+-- Remotes do FlashlightService (resolvidos em :Start).
+local FlashlightEquipRemote: RemoteEvent? = nil
+local FlashlightUnequipRemote: RemoteEvent? = nil
 
 
 -- Cria uma Part (presa ao CFrame da camera) com um SpotLight dentro dela.
@@ -56,6 +75,88 @@ function HotbarHandler._destroyFlashlightLight()
     if flashlightPart then
         flashlightPart:Destroy()
         flashlightPart = nil
+    end
+end
+
+
+-- Obtem (ou cria) o Animator do character local para tocar a animacao de flashlight.
+local function getCharacterAnimator(): Animator?
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildWhichIsA("Humanoid")
+    if not humanoid then
+        return nil
+    end
+    local animator = humanoid:FindFirstChildWhichIsA("Animator")
+    if not animator then
+        animator = Instance.new("Animator")
+        animator.Parent = humanoid
+    end
+    return animator
+end
+
+
+-- Toca a animacao de flashlight no character local, em loop (replica para os demais).
+local function playFlashlightCharacterAnim()
+    local animator = getCharacterAnimator()
+    if not animator then
+        return
+    end
+
+    local animation = Instance.new("Animation")
+    animation.AnimationId = FLASHLIGHT_ANIM_ID
+
+    local track = animator:LoadAnimation(animation)
+    track.Looped = true
+    track.Priority = Enum.AnimationPriority.Action
+    track:Play()
+    flashlightAnimTrack = track
+end
+
+
+-- Para a animacao de flashlight do character.
+local function stopFlashlightCharacterAnim()
+    if flashlightAnimTrack then
+        flashlightAnimTrack:Stop()
+        flashlightAnimTrack = nil
+    end
+end
+
+
+-- Destroi a copia local do modelo equipado (replicado pelo servidor). Para o dono, a 1a
+-- pessoa usa o viewmodel, entao o modelo do mundo nao deve aparecer na tela.
+local function destroyLocalEquippedModel(child: Instance)
+    if child.Name == EQUIPPED_FLASHLIGHT_NAME
+        and child:GetAttribute("Owner") == LocalPlayer.UserId then
+        child:Destroy()
+    end
+end
+
+
+-- Observa o character ate o modelo equipado replicar (e o destroi localmente). Tambem cobre
+-- o caso de ele ja existir no momento em que comecamos a observar.
+local function startEquippedModelWatcher()
+    if equippedModelWatcher then
+        equippedModelWatcher:Disconnect()
+        equippedModelWatcher = nil
+    end
+
+    local character = LocalPlayer.Character
+    if not character then
+        return
+    end
+
+    for _, child in ipairs(character:GetChildren()) do
+        destroyLocalEquippedModel(child)
+    end
+    equippedModelWatcher = character.ChildAdded:Connect(destroyLocalEquippedModel)
+end
+
+
+-- Para de observar o character por novos modelos equipados.
+local function stopEquippedModelWatcher()
+    if equippedModelWatcher then
+        equippedModelWatcher:Disconnect()
+        equippedModelWatcher = nil
     end
 end
 
@@ -136,11 +237,25 @@ local function registerItemCallbacks()
             viewmodel:SetViewmodelOffset(Vector3.new(3, -2, 0))
             playFlashlightAnims(viewmodel)
 
+            -- Animacao do character (replica para os demais) + pedido ao servidor para
+            -- clonar/soldar o modelo na mao direita e ligar o SpotLight.
+            playFlashlightCharacterAnim()
+            startEquippedModelWatcher()
+            if FlashlightEquipRemote then
+                FlashlightEquipRemote:FireServer()
+            end
+
             createFlashlightLight()
         end,
 
         OnUnequip = function()
             HotbarHandler._destroyFlashlightLight()
+
+            stopFlashlightCharacterAnim()
+            stopEquippedModelWatcher()
+            if FlashlightUnequipRemote then
+                FlashlightUnequipRemote:FireServer()
+            end
 
             local viewmodel = getViewmodel()
             if viewmodel then
@@ -152,6 +267,11 @@ end
 
 
 function HotbarHandler:Start()
+    local comms = ReplicatedStorage:WaitForChild("Comms")
+    local flashlightComms = comms:WaitForChild("Flashlight")
+    FlashlightEquipRemote = flashlightComms:WaitForChild("Equip") :: RemoteEvent
+    FlashlightUnequipRemote = flashlightComms:WaitForChild("Unequip") :: RemoteEvent
+
     Hotbar:Start()
     registerItemCallbacks()
 end
