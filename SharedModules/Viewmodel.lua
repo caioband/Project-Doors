@@ -72,8 +72,13 @@ function Viewmodel.new(config: ViewmodelConfig?)
 	self.Humanoid = nil
 	self.HumanoidRootPart = nil
 
-	-- Modelo de viewmodel clonado e anexado à câmera (criado em :CloneViewmodel)
+	-- Modelo de viewmodel clonado, renderizado num ViewportFrame (criado em :CloneViewmodel)
 	self.ViewmodelModel = nil
+	-- ScreenGui/ViewportFrame/WorldModel/Camera que hospedam o viewmodel (ver :CloneViewmodel)
+	self.ViewmodelGui = nil
+	self.ViewportFrame = nil
+	self.WorldModel = nil
+	self.ViewportCamera = nil
 	-- Offset aplicado à root do viewmodel em relação à câmera (ver :SetViewmodelOffset)
 	self.ViewmodelOffset = CFrame.new()
 	-- Offset estático aplicado à câmera em relação à orientação dela (ver :SetCameraOffset).
@@ -287,6 +292,13 @@ function Viewmodel:_update(deltaTime: number)
 	-- A câmera já inclui bob/sway, então o modelo herda esse movimento por seguir a câmera;
 	-- o swayCFrame extra dá ao viewmodel o balanço característico de arma vindo de SwayIntensity.
 	if self.ViewmodelModel then
+		-- Espelha a câmera do mundo na câmera do viewport para que o viewmodel (posicionado
+		-- em relação a self.Camera.CFrame) apareça corretamente dentro do ViewportFrame.
+		if self.ViewportCamera then
+			self.ViewportCamera.CFrame = self.Camera.CFrame
+			self.ViewportCamera.FieldOfView = self.CurrentFOV
+		end
+
 		local root = self.ViewmodelModel.PrimaryPart
 		if root then
 			-- Compensa o FOV: ao mudar o FOV (ex.: sprint), o viewmodel pareceria encolher e
@@ -373,10 +385,14 @@ function Viewmodel:SetConfig(newConfig: ViewmodelConfig)
 	end
 end
 
--- Clona o modelo de viewmodel de ReplicatedStorage.Assets.Models.Viewmodel.Viewmodel,
--- posiciona a root (PrimaryPart) na CFrame da câmera atual e anexa o modelo à câmera.
+-- Clona o modelo de viewmodel de ReplicatedStorage.Assets.Models.Viewmodel.Viewmodel
+-- e o renderiza dentro de um ViewportFrame (Size = UDim2.fromScale(1,1)) na PlayerGui.
+-- O modelo fica dentro de um WorldModel para que Humanoid/AnimationController possam
+-- tocar animações dentro do viewport. A câmera do viewport espelha a câmera do mundo
+-- todo frame (ver :_update), então o viewmodel acompanha a visão do player sem clipar
+-- na geometria do mundo.
 function Viewmodel:CloneViewmodel(): Model?
-	-- Garante que não exista um viewmodel anterior pendurado na câmera
+	-- Garante que não exista um viewmodel anterior
 	self:DestroyViewmodel()
 
 	local template = ReplicatedStorage
@@ -384,6 +400,38 @@ function Viewmodel:CloneViewmodel(): Model?
 		:WaitForChild("Models")
 		:WaitForChild("Viewmodel")
 		:WaitForChild("Viewmodel")
+
+	-- ScreenGui que hospeda o ViewportFrame do viewmodel.
+	local playerGui = self.Player:WaitForChild("PlayerGui")
+	local screenGui = Instance.new("ScreenGui")
+	screenGui.Name = "ViewmodelGui"
+	screenGui.ResetOnSpawn = false
+	screenGui.IgnoreGuiInset = true
+	-- Atrás da HUD do jogo, mas sempre na frente do mundo 3D.
+	screenGui.DisplayOrder = -1
+	screenGui.Parent = playerGui
+
+	-- ViewportFrame que renderiza o viewmodel ocupando a tela inteira.
+	local viewport = Instance.new("ViewportFrame")
+	viewport.Name = "ViewmodelViewport"
+	viewport.Size = UDim2.fromScale(1, 1)
+	viewport.BackgroundTransparency = 1
+	-- Iluminação própria do viewport (ele não herda a do mundo).
+	viewport.Ambient = Color3.fromRGB(200, 200, 200)
+	viewport.LightColor = Color3.fromRGB(255, 255, 255)
+	viewport.LightDirection = Vector3.new(-0.2, -1, -0.4).Unit
+	viewport.Parent = screenGui
+
+	-- Câmera do viewport: espelha a CFrame/FOV da câmera do mundo em :_update.
+	local viewportCamera = Instance.new("Camera")
+	viewportCamera.FieldOfView = self.Config.DefaultFOV :: number
+	viewportCamera.CFrame = self.Camera.CFrame
+	viewportCamera.Parent = viewport
+	viewport.CurrentCamera = viewportCamera
+
+	-- WorldModel permite que Humanoid/AnimationController toquem animações no viewport.
+	local worldModel = Instance.new("WorldModel")
+	worldModel.Parent = viewport
 
 	local clone = template:Clone()
 
@@ -393,7 +441,12 @@ function Viewmodel:CloneViewmodel(): Model?
 		root.CFrame = self.Camera.CFrame
 	end
 
-	clone.Parent = self.Camera
+	clone.Parent = worldModel
+
+	self.ViewmodelGui = screenGui
+	self.ViewportFrame = viewport
+	self.ViewportCamera = viewportCamera
+	self.WorldModel = worldModel
 	self.ViewmodelModel = clone
 
 	return clone
@@ -586,12 +639,21 @@ function Viewmodel:SetCameraOffset(offset: (CFrame | Vector3)?)
 	end
 end
 
--- Destrói o modelo de viewmodel que foi clonado e anexado à câmera do player.
+-- Destrói o viewmodel clonado e o ViewportFrame/ScreenGui que o hospedam.
 function Viewmodel:DestroyViewmodel()
 	if self.ViewmodelModel then
 		self.ViewmodelModel:Destroy()
 		self.ViewmodelModel = nil
 	end
+
+	if self.ViewmodelGui then
+		self.ViewmodelGui:Destroy()
+		self.ViewmodelGui = nil
+	end
+
+	self.ViewportFrame = nil
+	self.WorldModel = nil
+	self.ViewportCamera = nil
 end
 
 -- Pausa o viewmodel: para o loop de render (deixando a câmera livre para ser controlada
@@ -625,7 +687,7 @@ function Viewmodel:Resume()
 	self.IsPaused = false
 
 	if self.ViewmodelModel then
-		self.ViewmodelModel.Parent = self._pausedParent or self.Camera
+		self.ViewmodelModel.Parent = self._pausedParent or self.WorldModel
 		self._pausedParent = nil
 	end
 

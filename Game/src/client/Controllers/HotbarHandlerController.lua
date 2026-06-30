@@ -1,6 +1,63 @@
 local HotbarHandler = {}
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local Hotbar = require(ReplicatedStorage.Shared.SharedModules.Hotbar)
+
+-- Estado da luz (Part + SpotLight) que acompanha a camera enquanto a Flashlight esta equipada.
+local flashlightPart: Part? = nil
+local flashlightConnection: RBXScriptConnection? = nil
+
+
+-- Cria uma Part (presa ao CFrame da camera) com um SpotLight dentro dela.
+local function createFlashlightLight()
+    -- Garante que nao exista uma luz anterior pendurada.
+    HotbarHandler._destroyFlashlightLight()
+
+    local camera = workspace.CurrentCamera
+
+    local part = Instance.new("Part")
+    part.Name = "FlashlightLight"
+    part.Anchored = true
+    part.CanCollide = false
+    part.CanQuery = false
+    part.CanTouch = false
+    part.Transparency = 1
+    part.Size = Vector3.new(0.2, 0.2, 0.2)
+    part.CFrame = camera.CFrame
+
+    local spotlight = Instance.new("SpotLight")
+    spotlight.Angle = 90
+    spotlight.Brightness = 3
+    spotlight.Color = Color3.fromRGB(255, 255, 255)
+    spotlight.Range = 40
+    spotlight.Face = Enum.NormalId.Front
+    spotlight.Parent = part
+
+    part.Parent = workspace
+
+    -- Mantem a Part colada na CFrame da camera todo frame.
+    flashlightConnection = RunService.RenderStepped:Connect(function()
+        local cam = workspace.CurrentCamera
+        if cam and part.Parent then
+            part.CFrame = cam.CFrame
+        end
+    end)
+
+    flashlightPart = part
+end
+
+
+-- Destroi a Part/SpotLight da Flashlight e desconecta o loop de render.
+function HotbarHandler._destroyFlashlightLight()
+    if flashlightConnection then
+        flashlightConnection:Disconnect()
+        flashlightConnection = nil
+    end
+    if flashlightPart then
+        flashlightPart:Destroy()
+        flashlightPart = nil
+    end
+end
 
 
 -- Retorna a instancia ativa do Viewmodel (via ViewmodelController), ou nil.
@@ -78,9 +135,13 @@ local function registerItemCallbacks()
             viewmodel:LoadViewmodelAnims()
             viewmodel:SetViewmodelOffset(Vector3.new(3, -2, 0))
             playFlashlightAnims(viewmodel)
+
+            createFlashlightLight()
         end,
 
         OnUnequip = function()
+            HotbarHandler._destroyFlashlightLight()
+
             local viewmodel = getViewmodel()
             if viewmodel then
                 viewmodel:DestroyViewmodel()
