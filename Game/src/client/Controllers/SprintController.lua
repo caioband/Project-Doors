@@ -115,6 +115,17 @@ function SprintController:_updateAnalogSpeed()
 		return
 	end
 
+	-- Agachar tem prioridade sobre o sprint/analogico: a WalkSpeed fica travada na do agachado
+	-- (configurada no HumanoidController) enquanto o player estiver agachado, em qualquer plataforma.
+	local HumanoidController = self.GetController("HumanoidController")
+	if HumanoidController and HumanoidController:IsCrouchingState() then
+		local target = HumanoidController:GetCrouchWalkSpeed()
+		if math.abs(humanoid.WalkSpeed - target) > 0.001 then
+			humanoid.WalkSpeed = target
+		end
+		return
+	end
+
 	-- O modo e escolhido pelo dispositivo atual (ultimo input), nao pelo que esta conectado.
 	-- Assim, no PC (teclado/mouse) o sprint continua no LeftShift mesmo com um controle plugado.
 	local device = DeviceController:GetDevice()

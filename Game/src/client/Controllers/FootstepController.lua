@@ -240,6 +240,16 @@ function FootstepController:_update(character: Model, state: Tracked, dt: number
 		return
 	end
 
+	-- O player local agachado nao faz barulho de passos (o agachar e estado local, vindo do
+	-- HumanoidController). So vale para o proprio personagem; os demais nao tem esse estado aqui.
+	if character == Players.LocalPlayer.Character then
+		local HumanoidController = self.GetController and self.GetController("HumanoidController")
+		if HumanoidController and HumanoidController:IsCrouchingState() then
+			state.timeSinceStep = 0
+			return
+		end
+	end
+
 	-- Precisa estar no chao (estado Running cobre andar e correr) e de fato se movendo.
 	local humanoidState = humanoid:GetState()
 	local onGround = humanoidState == Enum.HumanoidStateType.Running
