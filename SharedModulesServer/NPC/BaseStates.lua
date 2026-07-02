@@ -5,12 +5,14 @@
 -- os thresholds de agent.Config. Um NPC especifico (NPCBehaviors/<Nome>.lua) pode sobrescrever
 -- qualquer um destes ou adicionar novos.
 --
---   * Idle   - parado (anim idle) por um tempo; ao expirar vai patrulhar. Detecta player -> Chase.
+--   * Idle   - parado (anim idle) por um tempo; ao expirar vai patrulhar. Detecta player -> Hunt.
 --   * Patrol - anda entre os AINodes (NavGraph). Ao chegar, volta a Idle (pausa natural entre
---              nodes). Detecta player -> Chase.
---   * Chase  - segue o player detectado (blackboard.Target), recomputando o caminho. Perde a
---              visao/distancia por LoseTargetTime s -> volta a Patrol. Ao alcancar, chama o
---              gancho OnReachPlayer (stub; NPCs so se movem por enquanto).
+--              nodes). Detecta player -> Hunt.
+--   * Hunt   - persegue o player (blackboard.Target) na velocidade/anim de corrida ("Run"),
+--              recomputando o caminho. Fica fora da visao por LoseTargetTime s -> volta a Patrol.
+--              Ao alcancar, chama o gancho OnReachPlayer (stub; NPCs so se movem por enquanto).
+--              E a UNICA rotina de perseguicao (Idle/Patrol detectam -> Hunt; o hunter spawnado
+--              tambem comeca em Hunt), para o comportamento e a animacao serem sempre consistentes.
 
 local BaseStates = {}
 
@@ -29,7 +31,7 @@ BaseStates.Idle = {
 		local target = agent:Sense(dt)
 		if target then
 			agent.Blackboard.Target = target
-			agent:SetState("Chase")
+			agent:SetState("Hunt")
 			return
 		end
 
@@ -56,7 +58,7 @@ BaseStates.Patrol = {
 		local target = agent:Sense(dt)
 		if target then
 			agent.Blackboard.Target = target
-			agent:SetState("Chase")
+			agent:SetState("Hunt")
 			return
 		end
 
@@ -83,7 +85,7 @@ BaseStates.Patrol = {
 	end,
 }
 
---== Chase ====================================================================================
+--== Hunt =====================================================================================
 
 -- Alvo ainda valido (existe, char presente, vivo)? Retorna o HumanoidRootPart ou nil.
 local function targetRoot(target: Player?): BasePart?
@@ -96,22 +98,29 @@ local function targetRoot(target: Player?): BasePart?
 	return nil
 end
 
-BaseStates.Chase = {
+-- Perseguicao: corre atras do alvo (blackboard.Target) na velocidade de perseguicao, tocando a
+-- animacao "Run". A Secretary comeca aqui (apos a falha do puzzle). Ela DESISTE e vai patrulhar os
+-- AINodes quando o alvo fica FORA DA VISAO (fora do DetectionRadius OU sem linha de visao) por
+-- LoseTargetTime segundos. O contador so vale depois de ter visto o alvo ao menos uma vez
+-- (hasSeen), para nao desistir durante a aproximacao inicial (caso spawne longe do alvo).
+BaseStates.Hunt = {
 	OnEnter = function(agent: any)
 		if agent.Humanoid then
 			agent.Humanoid.WalkSpeed = agent.Config.ChaseSpeed
 		end
-		agent:PlayLocomotion("Walk")
-		agent.StateData.repathTimer = agent.Config.PathRecomputeInterval -- recomputa ja no 1o update
-		agent.StateData.loseTimer = 0
+		agent:PlayLocomotion("Run")
+		agent.StateData.repathTimer = agent.Config.PathRecomputeInterval -- repath ja no 1o update
 		agent.StateData.senseTimer = 0
-		agent.StateData.visible = true
+		agent.StateData.loseTimer = 0
+		agent.StateData.hasSeen = false
+		agent.StateData.visible = false
 	end,
 
 	OnUpdate = function(agent: any, dt: number)
-		local target = agent.Blackboard.Target :: Player?
+		local target = agent.Blackboard.Target
 		local hrp = targetRoot(target)
 		if not hrp then
+			-- Alvo saiu/morreu: vai patrulhar.
 			agent.Blackboard.Target = nil
 			agent:SetState("Patrol")
 			return
@@ -128,8 +137,10 @@ BaseStates.Chase = {
 		end
 
 		if agent.StateData.visible then
+			agent.StateData.hasSeen = true
 			agent.StateData.loseTimer = 0
-		else
+		elseif agent.StateData.hasSeen then
+			-- Ja viu o alvo e agora esta fora da visao: conta para desistir e ir patrulhar.
 			agent.StateData.loseTimer += dt
 			if agent.StateData.loseTimer >= agent.Config.LoseTargetTime then
 				agent.Blackboard.Target = nil
@@ -138,59 +149,16 @@ BaseStates.Chase = {
 			end
 		end
 
+		-- Persegue a posicao atual do alvo (recomputa o caminho periodicamente).
+		agent.StateData.repathTimer += dt
+		if agent.StateData.repathTimer >= agent.Config.PathRecomputeInterval then
+			agent.StateData.repathTimer = 0
+			agent:MoveToPosition(hrp.Position)
+		end
+
 		-- Alcancou o player: dispara o gancho de contato (no-op por padrao).
 		if dist <= agent.Config.ReachDistance and agent.OnReachPlayer then
 			agent.OnReachPlayer(agent, target)
-		end
-
-		-- Recomputa o caminho (PathfindingService puro) ate a posicao atual do player.
-		agent.StateData.repathTimer += dt
-		if agent.StateData.repathTimer >= agent.Config.PathRecomputeInterval then
-			agent.StateData.repathTimer = 0
-			agent:MoveToPosition(hrp.Position)
-		end
-	end,
-}
-
---== Hunt =====================================================================================
-
--- Perseguicao IMPLACAVEL: corre atras do alvo (blackboard.Target) sem nunca desistir, ignorando
--- linha de visao/raio de deteccao. Se o alvo sai/morre, re-adquire o player vivo mais proximo.
--- Toca a animacao de corrida ("Run") na velocidade de perseguicao. Usado quando o NPC vira um
--- cacador ativo (ex.: Secretary apos a falha do puzzle do monitor).
-BaseStates.Hunt = {
-	OnEnter = function(agent: any)
-		if agent.Humanoid then
-			agent.Humanoid.WalkSpeed = agent.Config.ChaseSpeed
-		end
-		agent:PlayLocomotion("Run")
-		agent.StateData.repathTimer = agent.Config.PathRecomputeInterval -- repath ja no 1o update
-	end,
-
-	OnUpdate = function(agent: any, dt: number)
-		local hrp = targetRoot(agent.Blackboard.Target)
-		if not hrp then
-			-- Alvo saiu/morreu: re-adquire o player vivo mais proximo (raio ilimitado).
-			local nearest = agent:GetNearestPlayer(math.huge)
-			if nearest then
-				agent.Blackboard.Target = nearest
-				hrp = targetRoot(nearest)
-			end
-			if not hrp then
-				-- Ninguem para cacar no momento; aguarda (segue tocando a corrida parado).
-				return
-			end
-		end
-
-		agent.StateData.repathTimer += dt
-		if agent.StateData.repathTimer >= agent.Config.PathRecomputeInterval then
-			agent.StateData.repathTimer = 0
-			agent:MoveToPosition(hrp.Position)
-		end
-
-		-- Alcancou o player: dispara o gancho de contato (no-op por padrao).
-		if agent:DistanceTo(hrp.Position) <= agent.Config.ReachDistance and agent.OnReachPlayer then
-			agent.OnReachPlayer(agent, agent.Blackboard.Target)
 		end
 	end,
 }

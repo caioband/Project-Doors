@@ -18,6 +18,9 @@ local Secretary = {
 	Config = {
 		-- Velocidade de corrida ao cacar (Hunt/Chase usam ChaseSpeed).
 		ChaseSpeed = 25,
+		-- Segundos com o alvo fora da visao (fora do DetectionRadius OU sem linha de visao) antes
+		-- de desistir e ir patrulhar os AINodes. Ver BaseStates.Hunt.
+		LoseTargetTime = 5,
 		Animations = {
 			-- Animacao de corrida do Secretary (tocada no estado Hunt).
 			Run = "rbxassetid://130661528773809",

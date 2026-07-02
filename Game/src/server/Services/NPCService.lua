@@ -133,6 +133,23 @@ function NPCService:_injectDoors(agent: any, map: Model, knobs: { BasePart }?)
 end
 
 
+-- Coleta as BaseParts do mapa marcadas com um PathfindingModifier de Label "Obstacle". O NPC as
+-- respeita no fallback de linha reta (nao atravessa), ja que elas sao CanCollide=false e nao
+-- barram fisicamente. Ver NPCAgent:_pathCrossesObstacle.
+local function CollectObstacleParts(map: Model): { BasePart }
+	local parts: { BasePart } = {}
+	for _, d in ipairs(map:GetDescendants()) do
+		if d:IsA("PathfindingModifier") and d.Label == "Obstacle" then
+			local part = d.Parent
+			if part and part:IsA("BasePart") then
+				table.insert(parts, part)
+			end
+		end
+	end
+	return parts
+end
+
+
 -- Spawna e inicia os NPCs de um mapa recem-carregado. ctx e o BehaviorContext do RoundService.
 function NPCService:SpawnForMap(ctx: any)
 	local map = ctx.Map
@@ -144,6 +161,7 @@ function NPCService:SpawnForMap(ctx: any)
 	local nodesFolder = map:FindFirstChild("AINodes")
 	local nav = NavGraph.new(nodesFolder)
 	local doorKnobs = CollectDoorKnobs(map)
+	local obstacleParts = CollectObstacleParts(map)
 
 	local agents = {}
 	for _, model in ipairs(modelsFolder:GetChildren()) do
@@ -152,6 +170,7 @@ function NPCService:SpawnForMap(ctx: any)
 
 			local agent = NPCAgent.new(model, behavior and behavior.Config)
 			agent.NavGraph = nav
+			agent.ObstacleParts = obstacleParts
 			self:_injectDoors(agent, map, doorKnobs)
 			agent:RegisterStates(BaseStates)
 			if behavior and behavior.States then
@@ -196,6 +215,7 @@ function NPCService:SpawnHunter(map: Model, name: string, targetPlayer: Player?)
 	local behavior = ResolveBehavior(name)
 	local agent = NPCAgent.new(model, behavior and behavior.Config)
 	agent.NavGraph = NavGraph.new(map:FindFirstChild("AINodes"))
+	agent.ObstacleParts = CollectObstacleParts(map)
 	self:_injectDoors(agent, map)
 	agent:RegisterStates(BaseStates)
 	if behavior and behavior.States then

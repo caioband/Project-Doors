@@ -5,7 +5,7 @@
 --   * Movimento com desvio de obstaculos (PathfindingService + Humanoid:MoveTo)
 --   * Sensoriamento: player mais proximo, linha de visao (raycast) e distancias
 --   * Animacoes de locomocao (walk/idle) carregadas do config
---   * Uma state machine simples (Idle/Patrol/Chase vem de BaseStates; NPCs podem registrar
+--   * Uma state machine simples (Idle/Patrol/Hunt vem de BaseStates; NPCs podem registrar
 --     estados proprios via NPCBehaviors/<Nome>.lua)
 --
 -- Server-autoritativo: o Humanoid e o pathfinding rodam no server e replicam para os clients
@@ -59,6 +59,8 @@ export type NPCConfig = {
 	DoorOpenRadius: number?,
 	-- Intervalo (s) do scan de portas (nao roda todo frame).
 	DoorScanInterval: number?,
+	-- DEBUG: desenha bolinhas nos waypoints do caminho a cada recalculo (ver :_drawWaypoints).
+	DebugWaypoints: boolean?,
 	-- IDs das animacoes de locomocao ("rbxassetid://..."); vazio = anda sem animacao.
 	Animations: Animations?,
 	-- Parametros do PathfindingService:CreatePath.
@@ -81,6 +83,7 @@ local DEFAULT_CONFIG: NPCConfig = {
 	SpawnHeightOffset = 3,
 	DoorOpenRadius = 18,
 	DoorScanInterval = 0.3,
+	DebugWaypoints = true,
 	Animations = {},
 	AgentParams = {
 		AgentRadius = 3,
@@ -150,6 +153,10 @@ function NPCAgent.new(model: Model, config: NPCConfig?)
 	self.OpenDoorFn = nil :: ((BasePart) -> ())?
 	self._doorAccum = 0
 
+	-- Injetado pelo NPCService (opcional): parts com PathfindingModifier "Obstacle". O fallback de
+	-- linha reta NAO as atravessa. Ver :_pathCrossesObstacle.
+	self.ObstacleParts = nil :: { BasePart }?
+
 	-- Gancho de contato (stub) — ver cabecalho.
 	self.OnReachPlayer = nil :: ((any, Player) -> ())?
 
@@ -164,6 +171,9 @@ function NPCAgent.new(model: Model, config: NPCConfig?)
 	-- Tracks de animacao de locomocao por nome (Walk/Idle/Run) e a track ativa no momento.
 	self._tracks = {} :: { [string]: AnimationTrack }
 	self._activeTrack = nil :: AnimationTrack?
+
+	-- DEBUG: pasta com as bolinhas dos waypoints (ver :_drawWaypoints).
+	self._wpFolder = nil :: Folder?
 
 	self._alive = true
 
@@ -241,7 +251,15 @@ function NPCAgent:_prepareModel()
 	if self.Config.SpawnAtNode and self.NavGraph then
 		local node = self.NavGraph:GetRandomNode()
 		if node then
-			self.Model:PivotTo(CFrame.new(node.Position + Vector3.new(0, self.Config.SpawnHeightOffset, 0)))
+			-- O pivot do modelo e o HumanoidRootPart, que fica ACIMA da base do corpo. Teleportar
+			-- so o pivot para o node enterraria os pes no chao. Compensamos elevando o pivot pela
+			-- distancia do pivot ate a base do modelo, + a folga SpawnHeightOffset (a base cai sobre
+			-- o node e o NPC assenta no chao).
+			local pivotY = self.Model:GetPivot().Position.Y
+			local bbCF, bbSize = self.Model:GetBoundingBox()
+			local pivotToBottom = pivotY - (bbCF.Position.Y - bbSize.Y / 2)
+			local upOffset = pivotToBottom + self.Config.SpawnHeightOffset
+			self.Model:PivotTo(CFrame.new(node.Position + Vector3.new(0, upOffset, 0)))
 		end
 	end
 end
@@ -353,6 +371,72 @@ end
 
 --== Movimento ================================================================================
 
+-- DEBUG: desenha bolinhas Neon nas posicoes dadas (limpa as anteriores). Serve para visualizar o
+-- caminho calculado e ver se ele desvia dos Obstacles. Amarelo = waypoints do PathfindingService;
+-- vermelho (uma so) = fallback de linha reta (sem rota valida — cuidado: atravessa obstaculos).
+function NPCAgent:_drawWaypoints(points: { Vector3 }, color: Color3?)
+	if not self.Config.DebugWaypoints then
+		return
+	end
+	local folder = self._wpFolder
+	if not folder or not folder.Parent then
+		folder = Instance.new("Folder")
+		folder.Name = "NPCWaypoints_" .. self.Model.Name
+		folder.Parent = Workspace
+		self._wpFolder = folder
+	end
+	folder:ClearAllChildren()
+	for _, pos in ipairs(points) do
+		local ball = Instance.new("Part")
+		ball.Shape = Enum.PartType.Ball
+		ball.Size = Vector3.one
+		ball.Anchored = true
+		ball.CanCollide = false
+		ball.CanQuery = false
+		ball.Material = Enum.Material.Neon
+		ball.Color = color or Color3.fromRGB(255, 255, 0)
+		ball.Position = pos
+		ball.Parent = folder
+	end
+end
+
+-- True se o segmento reto da posicao atual ate 'dest' cruza alguma parte de Obstacle (injetadas
+-- pelo NPCService). Como os Obstacles sao CanCollide=false/CanQuery=false (invisiveis a raycast),
+-- a checagem e geometrica: amostra pontos ao longo do segmento e testa se caem dentro da caixa
+-- (OBB) de algum obstaculo, com folga do raio do agente. Usado para o fallback nao atravessa-los.
+function NPCAgent:_pathCrossesObstacle(dest: Vector3): boolean
+	local parts = self.ObstacleParts
+	if not parts or #parts == 0 or not self.RootPart then
+		return false
+	end
+	local origin = self.RootPart.Position
+	local seg = dest - origin
+	local dist = seg.Magnitude
+	if dist < 1 then
+		return false
+	end
+	local dir = seg / dist
+	local margin = (self.Config.AgentParams.AgentRadius or 2)
+	local step = 3
+	local count = math.floor(dist / step)
+
+	for _, part in ipairs(parts) do
+		if part.Parent then
+			local half = part.Size / 2
+			for s = 0, count do
+				local point = origin + dir * math.min(s * step, dist)
+				local lp = part.CFrame:PointToObjectSpace(point)
+				if math.abs(lp.X) <= half.X + margin
+					and math.abs(lp.Y) <= half.Y + margin
+					and math.abs(lp.Z) <= half.Z + margin then
+					return true
+				end
+			end
+		end
+	end
+	return false
+end
+
 -- Computa um caminho ate 'dest' (nil se falhar). Sincrono (ComputeAsync yield-a).
 function NPCAgent:_computePath(dest: Vector3): Path?
 	local path = PathfindingService:CreatePath(self.Config.AgentParams)
@@ -365,8 +449,64 @@ function NPCAgent:_computePath(dest: Vector3): Path?
 	return nil
 end
 
+-- Anda ate um waypoint com DETECCAO DE TRAVAMENTO. O Humanoid as vezes prende em quinas/lips do
+-- mapa mesmo com caminho livre (destrava com um empurrao). Aqui: se a distancia horizontal ate o
+-- waypoint para de diminuir, acumula "stuck"; passou de STUCK_JUMP -> PULA (destrava, igual ao
+-- empurrao); passou de STUCK_GIVEUP -> desiste do trecho (retorna "failed" -> recalcula o caminho).
+-- Retorna "reached" | "cancelled" | "failed".
+function NPCAgent:_stepTo(pos: Vector3, token: number): string
+	local hum = self.Humanoid
+	local root = self.RootPart :: BasePart
+	local STUCK_JUMP = 0.35 -- s sem progresso ate comecar a destravar (pular + passo lateral)
+	local MAX_TIME = 4.0 -- s no maximo tentando este waypoint antes de desistir (-> recalcula)
+	local REACH = 2 -- studs (horizontal) para considerar o waypoint alcancado
+
+	local function horizDist(): number
+		local p = root.Position
+		return (Vector3.new(p.X, 0, p.Z) - Vector3.new(pos.X, 0, pos.Z)).Magnitude
+	end
+
+	hum:MoveTo(pos)
+	local best = horizDist() -- menor distancia ja atingida (progresso real)
+	local stuck = 0
+	local elapsed = 0
+	while true do
+		task.wait(0.1)
+		if token ~= self._moveToken or not self._alive or not root.Parent then
+			return "cancelled"
+		end
+		elapsed += 0.1
+		local d = horizDist()
+		if d <= REACH then
+			return "reached"
+		end
+		if elapsed >= MAX_TIME then
+			return "failed"
+		end
+		if best - d > 0.1 then
+			best = d
+			stuck = 0
+		else
+			stuck += 0.1
+		end
+
+		if stuck >= STUCK_JUMP then
+			-- Destrava (igual a um empurrao): pula E da um passo lateral, alternando o lado.
+			hum.Jump = true
+			local flat = Vector3.new(pos.X - root.Position.X, 0, pos.Z - root.Position.Z)
+			if flat.Magnitude > 0.1 then
+				local side = Vector3.new(-flat.Z, 0, flat.X).Unit
+				local sign = if (math.floor(stuck / 0.2) % 2 == 0) then 1 else -1
+				hum:MoveTo(root.Position + side * (sign * 4))
+			end
+		else
+			hum:MoveTo(pos) -- reforca o alvo
+		end
+	end
+end
+
 -- Percorre UM trecho: computa o caminho ate 'dest' (PathfindingService) e segue seus waypoints
--- com Humanoid:MoveTo. Yielda ate concluir. 'token' casa com self._moveToken para cancelamento.
+-- (com destravamento por :_stepTo). Yielda ate concluir. 'token' casa com self._moveToken.
 -- Retorna "reached" | "failed" | "cancelled".
 function NPCAgent:_walkLeg(dest: Vector3, token: number): string
 	local path = self:_computePath(dest)
@@ -380,6 +520,13 @@ function NPCAgent:_walkLeg(dest: Vector3, token: number): string
 		if math.abs(dest.Y - (self.RootPart :: BasePart).Position.Y) > 25 then
 			return "failed"
 		end
+		-- Nao atravessa areas de Obstacle: se a linha reta cruzaria um obstaculo, desiste do trecho
+		-- (fica parado / a perseguicao retenta). Assim o fallback respeita os PathfindingModifiers.
+		if self:_pathCrossesObstacle(dest) then
+			return "failed"
+		end
+		-- Marca em vermelho: fallback de linha reta (sem rota) — usado p/ portas fechadas no caminho.
+		self:_drawWaypoints({ dest }, Color3.fromRGB(255, 0, 0))
 		self.Humanoid:MoveTo(dest)
 		self.Humanoid.MoveToFinished:Wait()
 		if token ~= self._moveToken or not self._alive then
@@ -389,6 +536,11 @@ function NPCAgent:_walkLeg(dest: Vector3, token: number): string
 	end
 
 	local waypoints = path:GetWaypoints()
+	local points: { Vector3 } = {}
+	for _, wp in ipairs(waypoints) do
+		table.insert(points, wp.Position)
+	end
+	self:_drawWaypoints(points)
 	-- waypoints[1] e a posicao atual; comeca do 2.
 	for i = 2, #waypoints do
 		if token ~= self._moveToken or not self._alive then
@@ -398,13 +550,9 @@ function NPCAgent:_walkLeg(dest: Vector3, token: number): string
 		if wp.Action == Enum.PathWaypointAction.Jump then
 			self.Humanoid.Jump = true
 		end
-		self.Humanoid:MoveTo(wp.Position)
-		local reached = self.Humanoid.MoveToFinished:Wait()
-		if token ~= self._moveToken or not self._alive then
-			return "cancelled"
-		end
-		if not reached then
-			return "failed"
+		local result = self:_stepTo(wp.Position, token)
+		if result ~= "reached" then
+			return result
 		end
 	end
 
@@ -528,6 +676,10 @@ function NPCAgent:Destroy()
 		track:Destroy()
 	end
 	self._tracks = {}
+	if self._wpFolder then
+		self._wpFolder:Destroy()
+		self._wpFolder = nil
+	end
 	if self.Model then
 		self.Model:Destroy()
 	end
