@@ -236,6 +236,20 @@ function DoorAnimator.SetOpen(knob: BasePart, open: boolean): boolean
 	return true
 end
 
+-- True se a porta (pelo Knob) esta aberta (Hinge fora da pose original). False se fechada ou
+-- se a estrutura for invalida. Util para abrir sob demanda so quando fechada (ex.: NPC).
+function DoorAnimator.IsOpen(knob: BasePart): boolean
+	local model = knob.Parent
+	if not (model and model:IsA("Model")) then
+		return false
+	end
+	local hinge = (model :: Model).PrimaryPart
+	if not hinge then
+		return false
+	end
+	return not isClosed(hinge :: BasePart)
+end
+
 -- Abre a porta.
 function DoorAnimator.Open(knob: BasePart): boolean
 	return DoorAnimator.SetOpen(knob, true)

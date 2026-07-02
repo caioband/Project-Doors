@@ -64,6 +64,35 @@ local function onDescendantAdded(descendant: Instance)
 	end
 end
 
+-- Resolve o Knob (BasePart "Knob") a partir de um Knob direto ou de um Model de porta.
+local function resolveKnob(door: Instance): BasePart?
+	if door:IsA("BasePart") and door.Name == "Knob" then
+		return door
+	end
+	if door:IsA("Model") then
+		local knob = door:FindFirstChild("Knob")
+		if knob and knob:IsA("BasePart") then
+			return knob
+		end
+	end
+	return nil
+end
+
+-- Abre uma porta programaticamente (aceita o Knob ou o Model da porta). Abre APENAS se estiver
+-- fechada (idempotente: no-op se ja aberta ou em animacao). Diferente do acionamento por prompt,
+-- NAO checa o atributo "Locked" — e uma abertura forcada usada por sistemas do jogo (ex.: a
+-- Secretary abrindo portas no caminho ao cacar). Retorna true se iniciou a animacao de abertura.
+function DoorService:OpenDoor(door: Instance): boolean
+	local knob = resolveKnob(door)
+	if not knob then
+		return false
+	end
+	if DoorAnimator.IsOpen(knob) then
+		return false
+	end
+	return DoorAnimator.Open(knob)
+end
+
 function DoorService:Init() end
 
 function DoorService:Start()

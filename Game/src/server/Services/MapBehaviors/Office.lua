@@ -40,6 +40,8 @@ local SetPasswordRemote: RemoteEvent
 local PlayPickSoundRemote: RemoteEvent
 local PlayPasswordVoiceRemote: RemoteEvent
 local AddPuzzleErrorRemote: RemoteEvent
+-- Cliente sinaliza (apos a animacao de falha) para spawnar a Secretary cacadora.
+local SpawnSecretaryRemote: RemoteEvent
 
 
 -- Garante a hierarquia ReplicatedStorage.Comms.Office e os Remotes do puzzle.
@@ -76,6 +78,7 @@ local function EnsureRemotes()
     PlayPickSoundRemote = ensure("PlayPickSound")
     PlayPasswordVoiceRemote = ensure("PlayPasswordVoice")
     AddPuzzleErrorRemote = ensure("AddPuzzleError")
+    SpawnSecretaryRemote = ensure("SpawnSecretary")
 end
 
 
@@ -102,6 +105,21 @@ function Office.OnLoad(ctx)
     print(string.format("[Office:server] OnLoad (loadId=%d) - mapa pronto para todos", ctx.LoadId))
 
     EnsureRemotes()
+
+    -- Secretary: NAO spawna na carga. Fica dormente (escondida) ate o puzzle do monitor falhar.
+    -- Quando o cliente termina a animacao de falha, dispara SpawnSecretary e ela e spawnada como
+    -- cacadora (estado Hunt) correndo atras de quem falhou. Ver NPCService / SharedModules.NPC.
+    local NPCService = ctx.GetService("NPCService")
+    NPCService:HideNPCInMap(ctx.Map, "Secretary")
+
+    local secretarySpawned = false
+    ctx.Connections:Connect(ctx.Map, "OfficeSpawnSecretary", SpawnSecretaryRemote.OnServerEvent, function(player: Player)
+        if secretarySpawned then
+            return
+        end
+        secretarySpawned = true
+        NPCService:SpawnHunter(ctx.Map, "Secretary", player)
+    end)
 
     local map = ctx.Map
     local phonesFolder = map:FindFirstChild("Phones")
@@ -322,6 +340,8 @@ end
 
 function Office.OnUnload(ctx)
     print(string.format("[Office:server] OnUnload (loadId=%d)", ctx.LoadId))
+    -- Encerra os NPCs deste mapa (cancela movimento/animacoes) antes do RoundService destruir o mapa.
+    ctx.GetService("NPCService"):ClearForMap(ctx.Map)
     -- ConnectionPlus ja desconecta o que foi registrado em ctx.Map; o mapa (e seus sons/telefones)
     -- e destruido pelo RoundService, encerrando qualquer Ring que ainda estivesse tocando.
 end

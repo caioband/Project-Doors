@@ -272,6 +272,9 @@ function Office.OnLoad(ctx)
                         -- Depois da animacao de falha: pede ao server para tocar varios telefones
                         -- aleatorios (so o som de Ring) por ~30s.
                         fireOfficeServer("StartFailureRing")
+
+                        -- E spawna a Secretary cacadora, que passa a correr atras do player.
+                        fireOfficeServer("SpawnSecretary")
                     end,
                 })
             end,
