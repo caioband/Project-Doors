@@ -81,19 +81,20 @@ local DEFAULT_CONFIG: NPCConfig = {
 	SenseInterval = 0.2,
 	SpawnAtNode = true,
 	SpawnHeightOffset = 3,
-	DoorOpenRadius = 18,
+	DoorOpenRadius = 5,
 	DoorScanInterval = 0.3,
 	DebugWaypoints = true,
 	Animations = {},
 	AgentParams = {
-		AgentRadius = 3,
-		AgentHeight = 5,
+		AgentRadius = 1,
+		AgentHeight = 1,
 		AgentCanJump = true,
 		WaypointSpacing = 4,
 		-- Custos por PathfindingModifier: areas marcadas com o modifier "Obstacle" sao evitadas
 		-- pelo pathfinding (custo infinito).
 		Costs = {
 			Obstacle = math.huge,
+			Door = 1
 		},
 	},
 }
@@ -147,10 +148,12 @@ function NPCAgent.new(model: Model, config: NPCConfig?)
 	-- Injetado pelo NPCService: rede de patrulha (AINodes) deste mapa.
 	self.NavGraph = nil :: any
 
-	-- Injetados pelo NPCService (opcionais): abertura de portas no caminho. DoorKnobs e a lista
-	-- de Knobs de porta do mapa; OpenDoorFn(knob) abre a porta (via DoorService). Ver :_scanDoors.
+	-- Injetados pelo NPCService (opcionais): tratamento de portas no caminho. DoorKnobs e a lista de
+	-- Knobs de porta do mapa; OpenDoorFn(knob) abre a porta (via DoorService); IsDoorClosedFn(knob)
+	-- diz se ela esta fechada. Ver :_scanDoors (abre a frente) e :_pickBlockingDoor (NoPath -> porta).
 	self.DoorKnobs = nil :: { BasePart }?
 	self.OpenDoorFn = nil :: ((BasePart) -> ())?
+	self.IsDoorClosedFn = nil :: ((BasePart) -> boolean)?
 	self._doorAccum = 0
 
 	-- Injetado pelo NPCService (opcional): parts com PathfindingModifier "Obstacle". O fallback de
@@ -437,6 +440,42 @@ function NPCAgent:_pathCrossesObstacle(dest: Vector3): boolean
 	return false
 end
 
+-- Escolhe um ponto de aproximacao da porta FECHADA que provavelmente bloqueia o caminho ate 'dest',
+-- para o NPC ir ate ela (o :_scanDoors a abre, liberando o navmesh). Retorna nil se nao houver.
+--
+-- Uma porta fechada e CanCollide, entao BLOQUEIA o navmesh: o path ate um alvo numa sala com a porta
+-- fechada da NoPath (o pathfinding "nao computa"). Como o PathfindingModifier NAO transpassa colisao,
+-- a solucao e ir FISICAMENTE abrir a porta. Entre as portas FECHADAS, escolhe a que esta mais "no
+-- caminho" (menor dist NPC->porta + porta->alvo). Mira num ponto a frente da porta, do LADO do NPC
+-- (a propria porta e colidivel; mirar nela poderia dar NoPath), para o path ate la ser computavel.
+function NPCAgent:_pickBlockingDoor(dest: Vector3): Vector3?
+	local knobs = self.DoorKnobs
+	if not knobs or #knobs == 0 or not self.RootPart then
+		return nil
+	end
+	local origin = self.RootPart.Position
+	local best: BasePart? = nil
+	local bestCost = math.huge
+	for _, knob in ipairs(knobs) do
+		-- So portas fechadas sao candidatas (as abertas nao bloqueiam; evita escolher/ir na errada).
+		if knob.Parent and (not self.IsDoorClosedFn or self.IsDoorClosedFn(knob)) then
+			local cost = (origin - knob.Position).Magnitude + (knob.Position - dest).Magnitude
+			if cost < bestCost then
+				best = knob
+				bestCost = cost
+			end
+		end
+	end
+	if not best then
+		return nil
+	end
+	-- Ponto a frente da porta, deslocado do lado do NPC (a maganeta/porta e colidivel).
+	local toNpc = origin - best.Position
+	local flat = Vector3.new(toNpc.X, 0, toNpc.Z)
+	local dir = if flat.Magnitude > 0.1 then flat.Unit else Vector3.new(0, 0, 1)
+	return best.Position + dir * 4
+end
+
 -- Computa um caminho ate 'dest' (nil se falhar). Sincrono (ComputeAsync yield-a).
 function NPCAgent:_computePath(dest: Vector3): Path?
 	local path = PathfindingService:CreatePath(self.Config.AgentParams)
@@ -511,28 +550,37 @@ end
 function NPCAgent:_walkLeg(dest: Vector3, token: number): string
 	local path = self:_computePath(dest)
 	if not path then
-		-- Sem rota no navmesh. No MESMO nivel isso e tipicamente uma porta fechada bloqueando o
-		-- pathfinding: avanca em LINHA RETA na direcao do alvo para encostar na porta; o :_scanDoors
-		-- a abre e o proximo recalculo (Chase/Hunt refazem o path a cada PathRecomputeInterval) ja
-		-- acha rota pela porta aberta. Se o alvo estiver em outro nivel/area desconectada (grande
-		-- diferenca de Y), NAO marcha as cegas — isso levaria o NPC a andar reto para fora do mapa
-		-- e cair. Nesse caso desiste do trecho (fica parado / a patrulha escolhe outro node).
-		if math.abs(dest.Y - (self.RootPart :: BasePart).Position.Y) > 25 then
+		-- Sem rota no navmesh. Tipicamente e uma PORTA FECHADA bloqueando o pathfinding (porta
+		-- fechada e CanCollide -> conta como parede no navmesh -> path ate um alvo na sala fechada da
+		-- NoPath). Como o PathfindingModifier nao transpassa colisao, a solucao e IR ATE a porta
+		-- fechada que esta no caminho: existe rota ate ela (esta do nosso lado), o :_scanDoors a abre
+		-- ao chegar perto (a porta gira para fora do vao, liberando o navmesh) e o proximo recalculo
+		-- (Chase/Hunt refazem o path a cada PathRecomputeInterval) acha a rota pela porta aberta.
+		local doorPoint = self:_pickBlockingDoor(dest)
+		if doorPoint then
+			path = self:_computePath(doorPoint)
+		end
+		if not path then
+			-- Sem porta candidata / rota ate ela: ultimo recurso e avancar em LINHA RETA na direcao
+			-- do alvo (encosta em quinas/portas para o :_scanDoors agir). So no MESMO nivel: se o alvo
+			-- esta em outra area/andar (grande diferenca de Y) NAO marcha as cegas (andaria reto para
+			-- fora do mapa e cairia). Tambem nao atravessa areas de Obstacle.
+			if math.abs(dest.Y - (self.RootPart :: BasePart).Position.Y) > 25 then
+				return "failed"
+			end
+			if self:_pathCrossesObstacle(dest) then
+				return "failed"
+			end
+			-- Marca em vermelho: fallback de linha reta (sem rota nem porta).
+			self:_drawWaypoints({ dest }, Color3.fromRGB(255, 0, 0))
+			self.Humanoid:MoveTo(dest)
+			self.Humanoid.MoveToFinished:Wait()
+			if token ~= self._moveToken or not self._alive then
+				return "cancelled"
+			end
 			return "failed"
 		end
-		-- Nao atravessa areas de Obstacle: se a linha reta cruzaria um obstaculo, desiste do trecho
-		-- (fica parado / a perseguicao retenta). Assim o fallback respeita os PathfindingModifiers.
-		if self:_pathCrossesObstacle(dest) then
-			return "failed"
-		end
-		-- Marca em vermelho: fallback de linha reta (sem rota) — usado p/ portas fechadas no caminho.
-		self:_drawWaypoints({ dest }, Color3.fromRGB(255, 0, 0))
-		self.Humanoid:MoveTo(dest)
-		self.Humanoid.MoveToFinished:Wait()
-		if token ~= self._moveToken or not self._alive then
-			return "cancelled"
-		end
-		return "failed"
+		-- Achou rota ate a porta fechada: segue os waypoints abaixo (o :_scanDoors a abre ao chegar).
 	end
 
 	local waypoints = path:GetWaypoints()

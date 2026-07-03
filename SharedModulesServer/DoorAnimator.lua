@@ -157,6 +157,24 @@ local function findKnobMotor(model: Model, knob: BasePart): Motor6D?
 	return nil
 end
 
+-- Sincroniza o PathfindingModifier da porta com o estado dela. O modifier fica DENTRO da MeshPart
+-- do painel (o filho BasePart chamado "Door") do modelo da porta.
+--   * FECHADA -> PassThrough = true  : o PathfindingService ATRAVESSA a porta fechada, entao o
+--     caminho ate um alvo numa sala com a porta fechada computa (o NPC vai ate a porta e a abre)
+--     em vez de dar NoPath.
+--   * ABERTA  -> PassThrough = false : a porta ja saiu do vao; volta a usar a colisao real.
+-- No-op se a porta nao tiver o painel/modifier.
+local function setDoorPassThrough(doorModel: Model, open: boolean)
+	local panel = doorModel:FindFirstChild("Door")
+	if not (panel and panel:IsA("BasePart")) then
+		return
+	end
+	local modifier = panel:FindFirstChildOfClass("PathfindingModifier")
+	if modifier then
+		modifier.PassThrough = not open
+	end
+end
+
 -- Define o estado da porta (open = true abre, false fecha) a partir do Knob (maçaneta).
 -- Retorna true se a animacao iniciou; false se ja estava nesse estado, ocupada ou invalida.
 function DoorAnimator.SetOpen(knob: BasePart, open: boolean): boolean
@@ -192,6 +210,10 @@ function DoorAnimator.SetOpen(knob: BasePart, open: boolean): boolean
 
 	-- Comando aceito: trava a porta para serializar a animacao.
 	busy[doorModel] = true
+
+	-- Mantem o PathfindingModifier em sincronia com o estado desejado: aberta -> PassThrough=false,
+	-- fechada -> PassThrough=true. Feito ja no inicio (pelo alvo 'open'), nao no fim da animacao.
+	setDoorPassThrough(doorModel, open)
 
 	-- Desativa a interacao durante toda a animacao (o Animator e o dono do prompt).
 	local prompt = doorModel:FindFirstChildWhichIsA("ProximityPrompt", true)
@@ -287,6 +309,9 @@ function DoorAnimator.Register(knob: BasePart)
 	if hinge then
 		-- Cache unico: getOriginalPivot deriva deste mesmo CFrame.
 		getOriginalCFrame(hinge :: BasePart)
+		-- Estado inicial do PathfindingModifier conforme a pose atual (registrada fechada ->
+		-- PassThrough=true, para o pathfinding ja atravessar portas fechadas desde a carga do mapa).
+		setDoorPassThrough(model :: Model, DoorAnimator.IsOpen(knob))
 	end
 end
 

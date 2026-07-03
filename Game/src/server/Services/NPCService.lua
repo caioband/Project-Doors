@@ -118,9 +118,11 @@ local function CollectDoorKnobs(map: Model): { BasePart }
 end
 
 
--- Injeta no agente a capacidade de abrir portas no caminho: a lista de Knobs do mapa e uma funcao
--- que abre uma porta via DoorService. No-op se o DoorService nao estiver disponivel. 'knobs' pode
--- ser passado ja coletado (evita recolher para cada NPC do mapa).
+-- Injeta no agente a capacidade de lidar com portas no caminho: a lista de Knobs do mapa, uma funcao
+-- que abre uma porta e outra que consulta se ela esta fechada (ambas via DoorService). No-op se o
+-- DoorService nao estiver disponivel. 'knobs' pode ser passado ja coletado (evita recolher por NPC).
+-- O IsDoorClosedFn permite ao NPC, quando o pathfinding da NoPath (porta fechada bloqueia o navmesh),
+-- escolher a porta FECHADA que esta no caminho e ir abri-la. Ver NPCAgent:_pickBlockingDoor.
 function NPCService:_injectDoors(agent: any, map: Model, knobs: { BasePart }?)
 	local doorService = self.GetService and self.GetService("DoorService")
 	if not doorService then
@@ -129,6 +131,9 @@ function NPCService:_injectDoors(agent: any, map: Model, knobs: { BasePart }?)
 	agent.DoorKnobs = knobs or CollectDoorKnobs(map)
 	agent.OpenDoorFn = function(knob: BasePart)
 		doorService:OpenDoor(knob)
+	end
+	agent.IsDoorClosedFn = function(knob: BasePart)
+		return not doorService:IsOpen(knob)
 	end
 end
 

@@ -93,6 +93,17 @@ function DoorService:OpenDoor(door: Instance): boolean
 	return DoorAnimator.Open(knob)
 end
 
+-- True se a porta (aceita o Knob ou o Model) esta aberta; false se fechada ou invalida. Usado por
+-- sistemas do jogo para decidir agir so quando fechada (ex.: o NPC escolhe a porta FECHADA no
+-- caminho para ir abrir quando o pathfinding da NoPath). Ver NPCAgent:_pickBlockingDoor.
+function DoorService:IsOpen(door: Instance): boolean
+	local knob = resolveKnob(door)
+	if not knob then
+		return false
+	end
+	return DoorAnimator.IsOpen(knob)
+end
+
 function DoorService:Init() end
 
 function DoorService:Start()
