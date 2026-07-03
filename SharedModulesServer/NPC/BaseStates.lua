@@ -109,11 +109,18 @@ BaseStates.Hunt = {
 			agent.Humanoid.WalkSpeed = agent.Config.ChaseSpeed
 		end
 		agent:PlayLocomotion("Run")
+		-- Liga o modo caca: audio "HuntAudio" do NPC + sinal aos clients (heartbeat/respiracao/tremor).
+		agent:SetHunting(true)
 		agent.StateData.repathTimer = agent.Config.PathRecomputeInterval -- repath ja no 1o update
 		agent.StateData.senseTimer = 0
 		agent.StateData.loseTimer = 0
 		agent.StateData.hasSeen = false
 		agent.StateData.visible = false
+	end,
+
+	OnExit = function(agent: any)
+		-- Saiu da caca (perdeu o alvo -> Patrol, ou foi destruido): desliga audio + sentidos no client.
+		agent:SetHunting(false)
 	end,
 
 	OnUpdate = function(agent: any, dt: number)

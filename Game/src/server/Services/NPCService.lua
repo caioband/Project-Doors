@@ -15,6 +15,7 @@
 
 local ServerScriptService = game:GetService("ServerScriptService")
 local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local NPCModules = ServerScriptService.Server.SharedModules.NPC
 local NPCAgent = require(NPCModules.NPCAgent)
@@ -22,6 +23,33 @@ local NavGraph = require(NPCModules.NavGraph)
 local BaseStates = require(NPCModules.BaseStates)
 
 local NPCService = {}
+
+-- Remote que avisa TODOS os clients quando um NPC entra/sai do modo caca. Disparado com
+-- (npcModel: Model, isHunting: boolean). O client (HuntSensesController) usa para ligar/desligar o
+-- heartbeat/respiracao e o tremor de camera, com intensidade pela proximidade do NPC mais proximo.
+local HuntStateRemote: RemoteEvent
+
+-- Garante a hierarquia ReplicatedStorage.Comms.NPC e o remote de estado de caca.
+local function EnsureRemotes()
+	local comms = ReplicatedStorage:FindFirstChild("Comms")
+	if not comms then
+		comms = Instance.new("Folder")
+		comms.Name = "Comms"
+		comms.Parent = ReplicatedStorage
+	end
+	local npc = comms:FindFirstChild("NPC")
+	if not npc then
+		npc = Instance.new("Folder")
+		npc.Name = "NPC"
+		npc.Parent = comms
+	end
+	HuntStateRemote = npc:FindFirstChild("HuntState") :: RemoteEvent
+	if not HuntStateRemote then
+		HuntStateRemote = Instance.new("RemoteEvent")
+		HuntStateRemote.Name = "HuntState"
+		HuntStateRemote.Parent = npc
+	end
+end
 
 -- Pasta com os descritores de logica unica por nome de NPC.
 local BehaviorsFolder = NPCModules:FindFirstChild("NPCBehaviors")
@@ -138,6 +166,17 @@ function NPCService:_injectDoors(agent: any, map: Model, knobs: { BasePart }?)
 end
 
 
+-- Injeta no agente o sinal de mudanca de modo caca: quando o NPC entra/sai de Hunt (via
+-- NPCAgent:SetHunting), avisa TODOS os clients com (model, isHunting). Serve para qualquer NPC.
+function NPCService:_injectHuntSignal(agent: any)
+	agent.OnHuntChanged = function(isHunting: boolean)
+		if HuntStateRemote then
+			HuntStateRemote:FireAllClients(agent.Model, isHunting)
+		end
+	end
+end
+
+
 -- Coleta as BaseParts do mapa marcadas com um PathfindingModifier de Label "Obstacle". O NPC as
 -- respeita no fallback de linha reta (nao atravessa), ja que elas sao CanCollide=false e nao
 -- barram fisicamente. Ver NPCAgent:_pathCrossesObstacle.
@@ -177,6 +216,7 @@ function NPCService:SpawnForMap(ctx: any)
 			agent.NavGraph = nav
 			agent.ObstacleParts = obstacleParts
 			self:_injectDoors(agent, map, doorKnobs)
+			self:_injectHuntSignal(agent)
 			agent:RegisterStates(BaseStates)
 			if behavior and behavior.States then
 				agent:RegisterStates(behavior.States)
@@ -222,6 +262,7 @@ function NPCService:SpawnHunter(map: Model, name: string, targetPlayer: Player?)
 	agent.NavGraph = NavGraph.new(map:FindFirstChild("AINodes"))
 	agent.ObstacleParts = CollectObstacleParts(map)
 	self:_injectDoors(agent, map)
+	self:_injectHuntSignal(agent)
 	agent:RegisterStates(BaseStates)
 	if behavior and behavior.States then
 		agent:RegisterStates(behavior.States)
@@ -251,6 +292,8 @@ end
 
 
 function NPCService:Start()
+	EnsureRemotes()
+
 	-- Loop unico: atualiza a state machine de cada agente ativo todo frame.
 	RunService.Heartbeat:Connect(function(dt: number)
 		for _, agents in pairs(ActiveByMap) do

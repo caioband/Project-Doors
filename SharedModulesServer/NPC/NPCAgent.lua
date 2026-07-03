@@ -163,6 +163,14 @@ function NPCAgent.new(model: Model, config: NPCConfig?)
 	-- Gancho de contato (stub) — ver cabecalho.
 	self.OnReachPlayer = nil :: ((any, Player) -> ())?
 
+	-- Modo caca (Hunt). HuntAudio: AudioPlayer do modelo (ex.: na RootPart, ligado a um AudioEmitter)
+	-- tocado ENQUANTO o NPC caca — audio espacial, roda no server e replica. OnHuntChanged: sinal
+	-- injetado pelo NPCService, avisa os clients ao entrar/sair da caca (heartbeat/respiracao/tremor
+	-- de camera). Ver :SetHunting, BaseStates.Hunt e o HuntSensesController (client).
+	self.HuntAudio = model:FindFirstChild("HuntAudio", true)
+	self.OnHuntChanged = nil :: ((boolean) -> ())?
+	self._hunting = false
+
 	-- Movimento: token invalida jobs de movimento anteriores; MoveStatus e lido pelos estados.
 	self._moveToken = 0
 	self.MoveStatus = "idle" -- idle | moving | reached | failed
@@ -235,6 +243,31 @@ function NPCAgent:PlayLocomotion(name: string)
 		elseif track.IsPlaying then
 			track:Stop(0.15)
 		end
+	end
+end
+
+-- Liga/desliga o "modo caca" deste NPC (idempotente). Ao LIGAR: toca o AudioPlayer "HuntAudio" do
+-- modelo (audio espacial de perseguicao, replica para todos via AudioEmitter). Ao DESLIGAR: para-o.
+-- Em ambos os casos dispara OnHuntChanged (se injetado) para o NPCService avisar os clients e ligar/
+-- desligar o sistema de heartbeat/respiracao/tremor de camera. Chamado por BaseStates.Hunt (OnEnter/
+-- OnExit) e por :Destroy (garante desligar se o NPC morrer/for removido cacando). Serve para QUALQUER
+-- NPC: basta o modelo ter um AudioPlayer chamado "HuntAudio".
+function NPCAgent:SetHunting(isHunting: boolean)
+	if self._hunting == isHunting then
+		return
+	end
+	self._hunting = isHunting
+
+	if self.HuntAudio and self.HuntAudio:IsA("AudioPlayer") then
+		if isHunting then
+			self.HuntAudio:Play()
+		else
+			self.HuntAudio:Stop()
+		end
+	end
+
+	if self.OnHuntChanged then
+		self.OnHuntChanged(isHunting)
 	end
 end
 
@@ -719,6 +752,8 @@ end
 function NPCAgent:Destroy()
 	self._alive = false
 	self._moveToken += 1
+	-- Se estava cacando, desliga o audio de caca e avisa os clients (antes de destruir o modelo).
+	self:SetHunting(false)
 	for _, track in pairs(self._tracks) do
 		track:Stop()
 		track:Destroy()
