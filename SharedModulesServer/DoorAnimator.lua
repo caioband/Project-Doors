@@ -46,6 +46,17 @@ local OPEN_ANGLE_OFFSET_ATTRIBUTE = "OpenAngleOffset"
 -- Aplicado depois do offset, entao o angulo final apenas troca de sinal.
 local MIRROR_ATTRIBUTE = "Mirror"
 
+-- Nome das pastas (dentro do modelo da porta) com as variacoes de AudioPlayer que sao
+-- sorteadas a cada abrir/fechar. Cada AudioPlayer ja vem "wired" a um AudioEmitter (na
+-- Hinge), entao tocar o player emite o som espacializado na posicao da porta.
+local OPEN_SOUND_FOLDER = "Open"
+local CLOSE_SOUND_FOLDER = "Close"
+
+-- Teto de PlaybackSpeed ao encaixar o som na animacao. Sem teto, sons longos (2-3s) num
+-- tween de 0.5s ficariam agudos demais (~4-6x). Com o teto, o som acelera no maximo isto
+-- e simplesmente continua tocando depois que a porta ja parou.
+local MAX_SOUND_PLAYBACK_SPEED = 1.5
+
 -- Tempo (s) entre o giro da maçaneta e a porta comecar a abrir.
 local OPEN_DELAY = 0.22
 
@@ -175,6 +186,53 @@ local function setDoorPassThrough(doorModel: Model, open: boolean)
 	end
 end
 
+-- Sobe pelos ancestrais do Knob procurando o primeiro Folder com esse nome. As pastas
+-- Open/Close ficam no modelo raiz da porta (avo do Knob: Knob -> "Door" -> "DoorNormal"),
+-- entao a busca por ancestral e robusta a variacoes de aninhamento. nil se nao houver.
+local function findSoundFolder(knob: BasePart, name: string): Folder?
+	local node: Instance? = knob.Parent
+	while node and node ~= game do
+		local folder = node:FindFirstChild(name)
+		if folder and folder:IsA("Folder") then
+			return folder :: Folder
+		end
+		node = node.Parent
+	end
+	return nil
+end
+
+-- Sorteia um AudioPlayer da pasta e o toca do inicio. Se 'fitDuration' (s) for dado e o
+-- audio for mais longo, ACELERA o playback (PlaybackSpeed) para tentar caber nesse tempo,
+-- mas limitado a MAX_SOUND_PLAYBACK_SPEED (nunca desacelera abaixo de 1x). Se o teto for
+-- atingido, o som simplesmente segue tocando apos a porta parar. Cada player ja esta ligado
+-- a um AudioEmitter via Wire, entao Play() basta para o som sair espacializado na porta.
+-- No-op se a pasta faltar/estiver vazia.
+local function playRandomSound(folder: Folder?, fitDuration: number?)
+	if not folder then
+		return
+	end
+	local players: { AudioPlayer } = {}
+	for _, child in folder:GetChildren() do
+		if child:IsA("AudioPlayer") then
+			table.insert(players, child)
+		end
+	end
+	if #players == 0 then
+		return
+	end
+
+	local player = players[math.random(#players)]
+	player.PlaybackSpeed = 1
+	if fitDuration and fitDuration > 0 then
+		local len = player.TimeLength -- 0 se o asset ainda nao carregou; cai no 1x
+		if len > fitDuration then
+			player.PlaybackSpeed = math.min(len / fitDuration, MAX_SOUND_PLAYBACK_SPEED)
+		end
+	end
+	player.TimePosition = 0
+	player:Play()
+end
+
 -- Define o estado da porta (open = true abre, false fecha) a partir do Knob (maçaneta).
 -- Retorna true se a animacao iniciou; false se ja estava nesse estado, ocupada ou invalida.
 function DoorAnimator.SetOpen(knob: BasePart, open: boolean): boolean
@@ -238,10 +296,22 @@ function DoorAnimator.SetOpen(knob: BasePart, open: boolean): boolean
 		local hingeCFrame = hingeTarget * hingePart.PivotOffset:Inverse()
 		local tween = TweenService:Create(hingePart, DOOR_TWEEN_INFO, { CFrame = hingeCFrame })
 
+		-- Som de ABRIR: toca no inicio do giro (o range da porta comeca a abrir), comprimido
+		-- para durar ate o tempo do tween (limitado pelo teto de velocidade).
+		if open then
+			playRandomSound(findSoundFolder(knob, OPEN_SOUND_FOLDER), DOOR_TWEEN_INFO.Time)
+		end
+
 		-- Ao terminar o giro da porta, devolve a maçaneta; quando ela assenta, reativa a
 		-- interacao e libera a porta. O busy so cai apos REENABLE_GRACE para rejeitar o
 		-- Triggered "fantasma" caso a tecla tenha ficado segurada na reativacao.
 		tween.Completed:Once(function()
+			-- Som de FECHAR: toca so aqui, quando a porta encosta no batente (a "batida"
+			-- acontece no fim do giro, nao no inicio). Ritmo natural, sem encaixe de tempo.
+			if not open then
+				playRandomSound(findSoundFolder(knob, CLOSE_SOUND_FOLDER), nil)
+			end
+
 			spr.target(knobM, KNOB_DAMPING, KNOB_FREQUENCY, { C0 = getOriginalC0(knobM) })
 			spr.completed(knobM, function()
 				if prompt then
