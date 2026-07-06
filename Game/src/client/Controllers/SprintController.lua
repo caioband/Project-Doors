@@ -115,9 +115,20 @@ function SprintController:_updateAnalogSpeed()
 		return
 	end
 
+	-- Downed tem prioridade MAXIMA sobre tudo: enquanto o player estiver caido, a WalkSpeed fica
+	-- travada na velocidade lenta do downed (configurada no HumanoidController), em qualquer
+	-- plataforma. Sem isto, este loop sobrescreveria a WalkSpeed todo frame e anularia o downed.
+	local HumanoidController = self.GetController("HumanoidController")
+	if HumanoidController and HumanoidController.IsDownedState and HumanoidController:IsDownedState() then
+		local target = HumanoidController:GetDownedWalkSpeed()
+		if math.abs(humanoid.WalkSpeed - target) > 0.001 then
+			humanoid.WalkSpeed = target
+		end
+		return
+	end
+
 	-- Agachar tem prioridade sobre o sprint/analogico: a WalkSpeed fica travada na do agachado
 	-- (configurada no HumanoidController) enquanto o player estiver agachado, em qualquer plataforma.
-	local HumanoidController = self.GetController("HumanoidController")
 	if HumanoidController and HumanoidController:IsCrouchingState() then
 		local target = HumanoidController:GetCrouchWalkSpeed()
 		if math.abs(humanoid.WalkSpeed - target) > 0.001 then

@@ -60,6 +60,20 @@ local CROUCH_CONFIG = {
 
 local CROUCH_ACTION = "Crouch"
 
+-- Configuração do estado "downed" (agonizante). O estado em si é autoritativo no server
+-- (DownedService, via atributo State do Character); aqui apenas impomos os efeitos locais de
+-- locomoção/animação, já que a WalkSpeed é client-autoritativa (reescrita todo frame pelo
+-- SprintController, que também respeita este estado).
+local DOWNED_CONFIG = {
+	-- WalkSpeed do player caído.
+	WalkSpeed = 2,
+}
+
+-- Id da animação tocada enquanto o player está downed (o dono do personagem toca no próprio
+-- client e a animação replica para os outros). Vazio = sem animação especial (só fica lento).
+-- Preencher com o rbxassetid desejado.
+local DOWNED_ANIM_ID = "rbxassetid://90743523675614"
+
 local HumanoidController = {}
 HumanoidController.Humanoid = nil :: Humanoid?
 HumanoidController.Animator = nil :: Animator?
@@ -76,6 +90,8 @@ HumanoidController.CrouchAmount = 0
 HumanoidController.BaseCameraOffset = nil :: CFrame?
 HumanoidController.CrouchInputReady = false
 HumanoidController.MobileCrouchButton = nil
+-- Estado do downed (imposto pelo DownedController a partir do atributo State do Character).
+HumanoidController.IsDowned = false
 
 function HumanoidController:Start()
 	local function onCharacterAdded(character: Model)
@@ -83,8 +99,10 @@ function HumanoidController:Start()
 		self.Humanoid = humanoid
 		self.RootPart = character:WaitForChild("HumanoidRootPart") :: BasePart
 
-		-- Cada respawn começa em pé.
+		-- Cada respawn começa em pé e vivo (o downed é reimposto pelo DownedController se o
+		-- atributo State voltar a "Downed").
 		self.IsCrouching = false
+		self.IsDowned = false
 
 		self:DisableDefaultAnimations(character)
 		self:SetupAnimations(humanoid)
@@ -149,6 +167,18 @@ function HumanoidController:SetupAnimations(humanoid: Humanoid)
 			loadTrack(name, id)
 		end
 	end
+
+	-- Animação de downed (opcional): prioridade Action para sobrepor as de movimento.
+	if DOWNED_ANIM_ID ~= "" then
+		local animation = Instance.new("Animation")
+		animation.Name = "Downed"
+		animation.AnimationId = DOWNED_ANIM_ID
+
+		local track = (animator :: Animator):LoadAnimation(animation)
+		track.Priority = Enum.AnimationPriority.Action
+		track.Looped = true
+		self.Tracks["Downed"] = track
+	end
 end
 
 -- Inicia o loop que decide qual animação tocar com base na velocidade da rootpart
@@ -168,6 +198,37 @@ end
 function HumanoidController:UpdateAnimation()
 	local rootPart = self.RootPart
 	if not rootPart or not rootPart.Parent then
+		return
+	end
+
+	-- Downed trava a troca de animação (não volta para Idle/Walk/Run) e, em vez disso, mantém a
+	-- track de caído em LOOP com a velocidade de reprodução proporcional à velocidade horizontal
+	-- da PrimaryPart: parado a animação praticamente congela; quanto mais rápido o player se
+	-- arrasta, mais rápido ela toca (mesma ideia do Walk/Run em :UpdateAnimationSpeed).
+	if self.IsDowned then
+		local downedTrack = self.Tracks["Downed"]
+		local animator = self.Animator
+
+		-- Mantém SÓ a animação de downed tocando: para qualquer outra track que tenha voltado a
+		-- tocar (idle do Animate padrão, emotes, etc.), garantindo que a de caído nunca seja
+		-- sobreposta enquanto o player estiver downed.
+		if animator then
+			for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+				if track ~= downedTrack then
+					track:Stop(0)
+				end
+			end
+		end
+
+		if downedTrack then
+			-- Garante o loop mesmo se a animação não vier marcada como Looped no asset.
+			if not downedTrack.IsPlaying then
+				downedTrack:Play(0.2)
+			end
+			local velocity = rootPart.AssemblyLinearVelocity
+			local speed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+			downedTrack:AdjustSpeed(speed / DOWNED_CONFIG.WalkSpeed)
+		end
 		return
 	end
 
@@ -269,6 +330,72 @@ end
 
 function HumanoidController:GetCrouchWalkSpeed(): number
 	return CROUCH_CONFIG.WalkSpeed
+end
+
+function HumanoidController:IsDownedState(): boolean
+	return self.IsDowned
+end
+
+function HumanoidController:GetDownedWalkSpeed(): number
+	return DOWNED_CONFIG.WalkSpeed
+end
+
+-- Liga/desliga o estado downed (chamado pelo DownedController conforme o atributo State do
+-- Character). Impõe WalkSpeed lenta + sem pulo e toca a animação de caído; ao sair, restaura.
+-- A WalkSpeed downed também é respeitada todo frame pelo SprintController (que a sobrescreve),
+-- com prioridade máxima, para não ser anulada.
+function HumanoidController:SetDowned(enabled: boolean)
+	if self.IsDowned == enabled then
+		return
+	end
+	self.IsDowned = enabled
+
+	local humanoid = self.Humanoid
+
+	if enabled then
+		-- Sair do agachar (se estiver) para não conflitar com o estado caído.
+		if self.IsCrouching then
+			self:SetCrouching(false)
+		end
+
+		if humanoid then
+			humanoid.WalkSpeed = DOWNED_CONFIG.WalkSpeed
+		end
+		-- Sem pulo enquanto caído.
+		self:SetProperty("JumpPower", 0)
+
+		self.CurrentState = nil
+
+		-- Para TODAS as animações que estiverem tocando neste momento (não só as nossas —
+		-- inclui idle default/emotes/qualquer fonte) e toca só a de downed. A supressão de
+		-- tracks que voltem a tocar depois é reforçada todo frame em :UpdateAnimation.
+		local downedTrack = self.Tracks["Downed"]
+		local animator = self.Animator
+		if animator then
+			for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+				if track ~= downedTrack then
+					track:Stop(0.1)
+				end
+			end
+		end
+
+		if downedTrack then
+			downedTrack:Play(0.2)
+		end
+	else
+		local downedTrack = self.Tracks["Downed"]
+		if downedTrack then
+			downedTrack:Stop(0.2)
+		end
+
+		-- Restaura pulo e deixa a WalkSpeed voltar ao normal (SprintController reassume no
+		-- próximo frame). CurrentState nil força o loop a repor a animação de movimento.
+		self:ResetProperty("JumpPower")
+		if humanoid then
+			humanoid.WalkSpeed = self.Overrides.WalkSpeed or DEFAULT_PROPERTIES.WalkSpeed
+		end
+		self.CurrentState = nil
+	end
 end
 
 -- Liga/desliga o agachar. A WalkSpeed agachada é imposta aqui e também respeitada todo
