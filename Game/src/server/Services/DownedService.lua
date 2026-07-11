@@ -51,6 +51,13 @@ local function initCharacter(character: Model)
 	character:SetAttribute("Health", MAX_HEALTH)
 	character:SetAttribute("State", "Alive")
 	character:SetAttribute("DownedToken", 0)
+
+	-- Em vida a cabeca nao colide (padrao); passa a colidir so na morte (ver :Kill), para o corpo
+	-- descansar no chao. Reforcamos aqui no spawn/respawn caso o padrao nao venha false.
+	local head = character:FindFirstChild("Head")
+	if head and head:IsA("BasePart") then
+		head.CanCollide = false
+	end
 end
 
 -- Remove o prompt de revive do personagem, se existir.
@@ -177,6 +184,13 @@ function DownedService:Kill(player: Player)
 	character:SetAttribute("State", "Dead")
 	character:SetAttribute("Health", 0)
 	destroyRevivePrompt(character)
+
+	-- Cabeca passa a colidir na morte para o corpo assentar no chao (revertido no proximo spawn
+	-- pelo initCharacter). Feito no server para valer no simulacao/fisica de todos os clientes.
+	local head = character:FindFirstChild("Head")
+	if head and head:IsA("BasePart") then
+		head.CanCollide = true
+	end
 
 	local humanoid = getHumanoid(character)
 	if humanoid then

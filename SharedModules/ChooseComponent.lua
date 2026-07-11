@@ -148,7 +148,6 @@ function InsertCornerComponent(data : ComponentData)
     local cancelConn
 
     confirmConn = confirm.Activated:Once(function()
-        print("leak test")
         if data.confirmCallback then
             data.confirmCallback()
         end
@@ -160,7 +159,6 @@ function InsertCornerComponent(data : ComponentData)
     end)
 
     cancelConn = cancel.Activated:Once(function()
-        print("leak test")
         if data.cancelCallback then
             data.cancelCallback()
         end
@@ -220,7 +218,6 @@ end
 
 
 function Component:Show(data : ComponentData)
-    print(data)
     assert(table.find(Types, data.type), "Invalid component type: " .. data.type)
     assert(typeof(data) == "table", "table expected for data, got " .. typeof(data))
     assert(typeof(data.type) == "string", "string expected for component type, got " .. typeof(data.type))
@@ -232,7 +229,7 @@ function Component:Show(data : ComponentData)
     assert(data.cancelCallback == nil or typeof(data.cancelCallback) == "function", "function   expected for cancelCallback, got " .. typeof(data.cancelCallback))
     
 
-    local Component = ChooseComponent.Frame:WaitForChild(data.type)
+    local Component = PlayerGui:WaitForChild("SharedGuis"):WaitForChild("ChooseComponent"):WaitForChild("Frame"):WaitForChild(data.type)
     Component.Content.Text = data.content
 
 

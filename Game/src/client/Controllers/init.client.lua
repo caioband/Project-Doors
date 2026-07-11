@@ -1,8 +1,23 @@
 local ReplicatedFirst = game:GetService("ReplicatedFirst")
+local StarterGui = game:GetService("StarterGui")
 
 while not ReplicatedFirst:GetAttribute("Loaded") do
 	ReplicatedFirst:GetAttributeChangedSignal("Loaded"):Wait()
 end
+
+-- Esconde a barra de vida padrao do Roblox. SetCoreGuiEnabled pode falhar se o CoreGui ainda nao
+-- estiver pronto no boot, entao insistimos ate dar certo (usamos nosso proprio HUD de vida).
+task.spawn(function()
+	while true do
+		local ok = pcall(function()
+			StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Health, false)
+		end)
+		if ok then
+			break
+		end
+		task.wait(0.1)
+	end
+end)
 
 local Controllers = {}
 

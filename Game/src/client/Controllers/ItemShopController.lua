@@ -30,7 +30,6 @@ local ScreenGui: ScreenGui
 local Container: Instance
 local ScrollingFrame: ScrollingFrame
 local Template: ImageLabel
-local ChooseGui: Instance?
 
 -- ScreenGuis ocultadas ao abrir a loja, para restaurar o estado original ao fechar.
 local HiddenUIs: { [ScreenGui]: boolean } = {}
@@ -76,11 +75,22 @@ local function ToggleFreeMouse()
 end
 
 
+-- Resolve a ScreenGui do ChooseComponent SOB DEMANDA. Ela mora dentro do Folder SharedGuis, que o
+-- Roblox RE-CLONA inteiro a cada respawn — uma referencia cacheada ficaria obsoleta e o HideOtherUIs
+-- esconderia o ChooseComponent NOVO (por nao bater com a referencia velha), deixando as respostas da
+-- loja invisiveis ao comprar. Resolvendo ao vivo, a comparacao usa sempre a instancia atual.
+local function GetChooseGui(): Instance?
+    local sharedGuis = PlayerGui:FindFirstChild("SharedGuis")
+    return sharedGuis and sharedGuis:FindFirstChild("ChooseComponent")
+end
+
+
 -- Oculta todas as ScreenGuis (exceto a da loja e a do ChooseComponent), guardando o estado.
 local function HideOtherUIs()
     HiddenUIs = {}
+    local chooseGui = GetChooseGui()
     for _, gui in ipairs(PlayerGui:GetDescendants()) do
-        if gui:IsA("ScreenGui") and gui.Enabled and gui ~= ScreenGui and gui ~= ChooseGui then
+        if gui:IsA("ScreenGui") and gui.Enabled and gui ~= ScreenGui and gui ~= chooseGui then
             HiddenUIs[gui] = true
             gui.Enabled = false
         end
@@ -205,6 +215,25 @@ local function PreloadItemAssets(item)
 end
 
 
+-- Ancora/desancora a PrimaryPart do character. Ao comprar, ancoramos (o player fica parado
+-- enquanto a resposta do ChooseComponent esta na tela) e desancoramos no confirmCallback (OK).
+local function AnchorCharacter()
+    local character = LocalPlayer.Character
+    local root = character and (character.PrimaryPart or character:FindFirstChild("HumanoidRootPart"))
+    if root and root:IsA("BasePart") then
+        root.Anchored = true
+    end
+end
+
+local function UnanchorCharacter()
+    local character = LocalPlayer.Character
+    local root = character and (character.PrimaryPart or character:FindFirstChild("HumanoidRootPart"))
+    if root and root:IsA("BasePart") then
+        root.Anchored = false
+    end
+end
+
+
 -- Cria um card de item a partir do template e configura o botao de compra.
 local function RenderItem(item)
     local card = Template:Clone()
@@ -224,6 +253,9 @@ local function RenderItem(item)
     card.BuyBtn.Activated:Connect(function()
         card.BuyBtn.Active = false
 
+        -- Ancora o player enquanto processa a compra e a resposta fica na tela.
+        AnchorCharacter()
+
         local ok, response = pcall(function()
             return BuyItemRemote:InvokeServer(item.Id)
         end)
@@ -234,6 +266,7 @@ local function RenderItem(item)
                 type = "Center",
                 content = "Something went wrong. Please try again.",
                 confirmText = "OK",
+                confirmCallback = UnanchorCharacter,
             })
             return
         end
@@ -250,6 +283,7 @@ local function RenderItem(item)
             type = "Center",
             content = response.message,
             confirmText = "OK",
+            confirmCallback = UnanchorCharacter,
         })
     end)
 end
@@ -323,6 +357,10 @@ function ItemShopController:Close()
     RestoreOtherUIs()
     HideBlur()
     ToggleFreeMouse()
+
+    -- Rede de seguranca: se a loja fechar (Escape/distancia) com uma resposta de compra ainda na
+    -- tela, garante que o player nao fique preso ancorado (o desancorar principal e o confirmCallback).
+    UnanchorCharacter()
 end
 
 
@@ -336,9 +374,8 @@ function ItemShopController:Start()
     Template.Visible = false
     ScreenGui.Enabled = false
 
-    -- ChooseComponent precisa continuar visivel para exibir respostas/erros do servidor.
-    local sharedGuis = PlayerGui:FindFirstChild("SharedGuis")
-    ChooseGui = sharedGuis and sharedGuis:FindFirstChild("ChooseComponent")
+    -- (A ScreenGui do ChooseComponent — que precisa continuar visivel para exibir respostas/erros
+    -- do servidor — e resolvida sob demanda em GetChooseGui, pois o SharedGuis re-clona no respawn.)
 
     Comms = ReplicatedStorage:WaitForChild("Comms")
     local itemShopFolder = Comms:WaitForChild("ItemShop")

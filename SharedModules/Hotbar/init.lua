@@ -2,6 +2,7 @@ local Hotbar = {}
 
 local ContextActionService = game:GetService("ContextActionService")
 local UserInputService = game:GetService("UserInputService")
+local Players = game:GetService("Players")
 
 local UI = require(script.UI)
 local DeviceController = require(script.Parent.DeviceController)
@@ -14,6 +15,10 @@ type ItemCallbacks = {
 }
 
 Hotbar.Callbacks = {} :: { [string]: ItemCallbacks }
+
+-- Se a Hotbar esta habilitada (UI visivel + binds ativos). Desligada na morte do player e religada
+-- no respawn (ver :Disable/:Enable). O handler de re-clone (respawn) respeita esta flag.
+Hotbar.Enabled = true
 
 -- Registra (ou substitui) os callbacks de um item pelo nome.
 function Hotbar:SetItemCallbacks(itemName: string, callbacks: ItemCallbacks)
@@ -144,6 +149,71 @@ function Hotbar:Start()
     refreshSlots(self)
 
     UserInputService.LastInputTypeChanged:Connect(function()
+        refreshSlots(self)
+    end)
+
+    -- A ScreenGui da Hotbar mora dentro do Folder SharedGuis, e o Roblox RE-CLONA esse Folder INTEIRO
+    -- a cada respawn (ResetOnSpawn=false so e respeitado para filhos DIRETOS do StarterGui; GUIs
+    -- aninhadas num Folder sao sempre recriadas). A copia nova volta Enabled=false (default do template)
+    -- e sem itens renderizados, entao a hotbar "sumia" ao resetar. Aqui detectamos a Hotbar recriada
+    -- reaparecendo na PlayerGui (que persiste) e a re-renderizamos: re-liga (UI:Render) e repovoa os
+    -- slots a partir do estado em memoria (self.Slots, que sobrevive ao respawn).
+    local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
+    playerGui.DescendantAdded:Connect(function(desc)
+        if not desc:IsA("ScreenGui") or desc.Name ~= "Hotbar" then
+            return
+        end
+        local parent = desc.Parent
+        if not parent or parent.Name ~= "SharedGuis" then
+            return
+        end
+        -- O clone e parenteado de cima para baixo: espera a hierarquia interna (Frame) assentar
+        -- antes de renderizar, senao o refreshSlots nao acha os slots.
+        desc:WaitForChild("Frame", 5)
+        -- Respeita o estado de habilitacao: se a hotbar esta desligada (player morto no momento
+        -- do re-clone), mantem a copia nova escondida em vez de forcar Enabled=true.
+        if self.Enabled then
+            UI:Render()
+            refreshSlots(self)
+        else
+            desc.Enabled = false
+        end
+    end)
+end
+
+-- Desativa a Hotbar na morte do player: desequipa o item em mao (limpa efeitos do item, ex.: a luz
+-- da flashlight que segue a camera), desliga os binds de teclado/controle e esconde a UI.
+function Hotbar:Disable()
+    self.Enabled = false
+
+    for i, s in pairs(self.Slots) do
+        if s.Equipped then
+            self:Unequip(i)
+        end
+    end
+
+    for slotNumber in pairs(self.Slots) do
+        ContextActionService:UnbindAction("HotbarSlot" .. slotNumber)
+    end
+
+    UI:SetScreenEnabled(false)
+end
+
+-- Reativa a Hotbar (UI + binds) no respawn. Feito em task.spawn porque a ScreenGui pode estar sendo
+-- re-clonada nesse instante (WaitForChild espera a copia nova + o Frame interno assentarem).
+-- Idempotente com o handler de re-clone: refreshSlots desliga os binds antes de religar.
+function Hotbar:Enable()
+    self.Enabled = true
+
+    task.spawn(function()
+        local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
+        local sharedGuis = playerGui:WaitForChild("SharedGuis")
+        sharedGuis:WaitForChild("Hotbar"):WaitForChild("Frame", 5)
+        -- Se o player morreu de novo enquanto esperavamos, aborta (mantem desativada).
+        if not self.Enabled then
+            return
+        end
+        UI:Render()
         refreshSlots(self)
     end)
 end

@@ -28,14 +28,24 @@ local REVIVE_PROMPT_NAME = "RevivePrompt"
 local AUDIO_MUFFLE_FACTOR = 0.25
 -- Zoom minimo (studs) forcado enquanto downed, para jogar a camera para a 3a pessoa.
 local DOWNED_CAM_MIN_ZOOM = 10
+-- Zoom minimo (studs) forcado na MORTE, para jogar a camera para a 3a pessoa automaticamente.
+local DEAD_CAM_MIN_ZOOM = 10
+
+-- Duracao (s) do estado downed antes da morte por timeout. ESPELHA DownedService.DOWNED_DURATION:
+-- manter em sincronia com o server (a barra de downed anima com base neste tempo). Como o server
+-- mata no fim do timer (State -> "Dead"), a barra e escondida nesse momento mesmo se nao zerou 100%.
+local DOWNED_DURATION = 30
+-- Cores da barra de downed: cheia = verde, perto de acabar = vermelho (transicao suave via Lerp).
+local DOWNED_BAR_GREEN = Color3.fromRGB(8, 255, 24)
+local DOWNED_BAR_RED = Color3.fromRGB(255, 0, 0)
 -- Duracao (s) do fade da tela P&B.
 local DESATURATE_FADE = 0.6
 
--- Camera de spectate (3a pessoa fixa atras do alvo).
-local SPECTATE_CAM_DISTANCE = 12
-local SPECTATE_CAM_HEIGHT = 3
-
-local SPECTATE_RENDER_NAME = "SpectateCamera"
+-- Limites de zoom da camera de spectate. Usamos a CAMERA PADRAO do Roblox (CameraType Custom +
+-- CameraSubject), entao o player orbita/zooma livremente com colisao de parede (Popper). O min > 1
+-- impede ficar em 1a pessoa; o max limita o zoom out.
+local SPECTATE_MIN_ZOOM = 6
+local SPECTATE_MAX_ZOOM = 24
 
 local DownedController = {}
 
@@ -52,6 +62,17 @@ DownedController.Spectating = false
 DownedController.SpectateTargets = {} :: { Player }
 DownedController.SpectateIndex = 1
 DownedController.SpectateGui = nil :: ScreenGui?
+-- Conexoes que monitoram a validade do alvo atual (para trocar de alvo se ele morrer/sair).
+DownedController.SpectateTargetConns = {} :: { RBXScriptConnection }
+-- Se os efeitos de MORTE (viewmodel pausado + hotbar desativada) estao aplicados. Usado para
+-- reverter no respawn de forma idempotente.
+DownedController.DeadEffectsActive = false
+-- Estado da barra de downed (StarterGui.DownedBar). Resolvida sob demanda (ResetOnSpawn re-clona).
+DownedController.DownedBar = nil :: ScreenGui?
+DownedController.DownedBarFill = nil :: Frame?
+DownedController.DownedBarFullWidth = 0
+DownedController.DownedBarStart = 0
+DownedController.DownedBarConnection = nil :: RBXScriptConnection?
 
 
 -- =========================================================================================
@@ -67,6 +88,70 @@ end
 function DownedController:_getHumanoidController()
 	local getController = self.GetController
 	return getController and getController("HumanoidController")
+end
+
+function DownedController:_getHotbarController()
+	local getController = self.GetController
+	return getController and getController("HotbarHandlerController")
+end
+
+function DownedController:_getDeathScreenController()
+	local getController = self.GetController
+	return getController and getController("DeathScreenController")
+end
+
+-- Efeitos aplicados na MORTE real (State == "Dead"): desativa o viewmodel (esconde o modelo e
+-- desliga o loop de render "ViewmodelUpdate" via :Pause) e a Hotbar (UI + binds). Idempotente.
+function DownedController:_enterDead()
+	if self.DeadEffectsActive then
+		return
+	end
+	self.DeadEffectsActive = true
+
+	local viewmodel = self:_getViewmodel()
+	if viewmodel then
+		viewmodel:Pause()
+		-- Cursor visivel e destravado na DeathScreen. Tambem desliga o sway enquanto o mouse livre.
+		viewmodel:SetFreeMouse(true)
+	end
+
+	-- Vai para 3a pessoa automaticamente na morte. SOBE o Max antes de subir o Min (o Roblox nao
+	-- deixa o Min ficar acima do Max; vindo da 1a pessoa Max=0.5). Sair da 1a pessoa tambem impede
+	-- o camera script padrao de re-travar o cursor no centro, deixando o mouse de fato livre.
+	LocalPlayer.CameraMaxZoomDistance = 128
+	LocalPlayer.CameraMinZoomDistance = DEAD_CAM_MIN_ZOOM
+
+	local hotbar = self:_getHotbarController()
+	if hotbar then
+		hotbar:SetHotbarEnabled(false)
+	end
+end
+
+-- Reverte os efeitos de morte no respawn: religa o viewmodel (:Resume rebinda o render e reexibe o
+-- modelo) e a Hotbar. Idempotente (so age se estava morto).
+function DownedController:_exitDead()
+	if not self.DeadEffectsActive then
+		return
+	end
+	self.DeadEffectsActive = false
+
+	-- Respawn: volta para a 1a pessoa. BAIXA o Min ANTES do Max (o Roblox nao deixa o Max ficar
+	-- abaixo do Min; vindo da morte Min=10). Feito antes do SetFreeMouse(false) para o cursor
+	-- travar corretamente no centro da 1a pessoa.
+	LocalPlayer.CameraMinZoomDistance = 0.5
+	LocalPlayer.CameraMaxZoomDistance = 0.5
+
+	local viewmodel = self:_getViewmodel()
+	if viewmodel then
+		viewmodel:Resume()
+		-- Respawn: volta a esconder/travar o cursor no centro (1a pessoa).
+		viewmodel:SetFreeMouse(false)
+	end
+
+	local hotbar = self:_getHotbarController()
+	if hotbar then
+		hotbar:SetHotbarEnabled(true)
+	end
 end
 
 
@@ -229,7 +314,91 @@ function DownedController:_hideOwnRevivePrompt()
 	end)
 end
 
+-- =========================================================================================
+-- Barra de downed (StarterGui.DownedBar): encolhe com o tempo restante para ser revivido e
+-- transiciona de verde (cheia) para vermelho (perto de acabar). O tempo total espelha o server.
+-- =========================================================================================
+
+-- Resolve a UI sob demanda (a DownedBar tem ResetOnSpawn=true, entao e re-clonada a cada respawn;
+-- uma referencia cacheada ficaria obsoleta). Retorna (ScreenGui, Frame do fill) ou nil.
+function DownedController:_resolveDownedBar(): (ScreenGui?, Frame?)
+	local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+	local bar = playerGui and playerGui:FindFirstChild("DownedBar")
+	local frame = bar and bar:FindFirstChild("Frame")
+	local fill = frame and frame:FindFirstChild("Bar")
+	if bar and bar:IsA("ScreenGui") and fill and fill:IsA("Frame") then
+		return bar, fill
+	end
+	return nil, nil
+end
+
+-- Atualiza (todo frame) a largura e a cor do fill conforme o tempo decorrido de downed.
+function DownedController:_updateDownedBar()
+	local fill = self.DownedBarFill
+	if not fill or not fill.Parent then
+		return
+	end
+	local elapsed = os.clock() - self.DownedBarStart
+	local progress = math.clamp(elapsed / DOWNED_DURATION, 0, 1) -- 0 no inicio, 1 no fim
+	local remaining = 1 - progress
+
+	local size = fill.Size
+	-- Encolhe so a largura (X.Scale), preservando o resto do UDim2.
+	fill.Size = UDim2.new(self.DownedBarFullWidth * remaining, size.X.Offset, size.Y.Scale, size.Y.Offset)
+	-- Verde (cheia) -> vermelho (fim), transicao suave.
+	fill.BackgroundColor3 = DOWNED_BAR_GREEN:Lerp(DOWNED_BAR_RED, progress)
+end
+
+function DownedController:_startDownedBar()
+	local bar, fill = self:_resolveDownedBar()
+	if not bar or not fill then
+		return
+	end
+
+	self.DownedBar = bar
+	self.DownedBarFill = fill
+	-- Largura "cheia" = a largura autorada da barra (respeita o que foi montado na UI).
+	self.DownedBarFullWidth = fill.Size.X.Scale
+	self.DownedBarStart = os.clock()
+
+	fill.BackgroundColor3 = DOWNED_BAR_GREEN
+	bar.Enabled = true
+
+	if self.DownedBarConnection then
+		self.DownedBarConnection:Disconnect()
+	end
+	self.DownedBarConnection = RunService.RenderStepped:Connect(function()
+		self:_updateDownedBar()
+	end)
+	self:_updateDownedBar()
+end
+
+function DownedController:_stopDownedBar()
+	if self.DownedBarConnection then
+		self.DownedBarConnection:Disconnect()
+		self.DownedBarConnection = nil
+	end
+
+	local bar = self.DownedBar
+	local fill = self.DownedBarFill
+	-- Reseta a barra para cheia + verde e esconde (guardas contra instancias ja destruidas no respawn).
+	if fill and fill.Parent then
+		local size = fill.Size
+		fill.Size = UDim2.new(self.DownedBarFullWidth, size.X.Offset, size.Y.Scale, size.Y.Offset)
+		fill.BackgroundColor3 = DOWNED_BAR_GREEN
+	end
+	if bar and bar.Parent then
+		bar.Enabled = false
+	end
+
+	self.DownedBar = nil
+	self.DownedBarFill = nil
+end
+
 function DownedController:_enterDowned()
+	-- Barra de downed: aparece e comeca a contar/encolher.
+	self:_startDownedBar()
+
 	-- Efeitos visuais/audio locais.
 	self:_setDesaturate(true)
 	pcall(function()
@@ -255,10 +424,21 @@ function DownedController:_enterDowned()
 		humanoidController:SetDowned(true)
 	end
 
+	-- Desativa a Hotbar enquanto caido (UI + binds). Religa so ao ser levantado (transicao
+	-- Downed -> Alive) ou ao respawnar (via _exitDead). NAO religamos no _exitDowned porque ele
+	-- tambem roda no caminho Downed -> Dead, onde a hotbar deve continuar desativada.
+	local hotbar = self:_getHotbarController()
+	if hotbar then
+		hotbar:SetHotbarEnabled(false)
+	end
+
 	self:_hideOwnRevivePrompt()
 end
 
 function DownedController:_exitDowned()
+	-- Esconde/reseta a barra de downed (revive ou morte por timeout).
+	self:_stopDownedBar()
+
 	self:_setDesaturate(false)
 	pcall(function()
 		self:_setReverb(false)
@@ -317,6 +497,7 @@ function DownedController:_cycleSpectate(delta: number)
 		return
 	end
 	self.SpectateIndex = ((self.SpectateIndex - 1 + delta) % count) + 1
+	self:_applySpectateSubject()
 end
 
 function DownedController:_enterSpectate()
@@ -340,25 +521,58 @@ function DownedController:_enterSpectate()
 		gui.Enabled = true
 	end
 
-	local camera = Workspace.CurrentCamera
-	camera.CameraType = Enum.CameraType.Scriptable
+	-- Esconde a DeathScreen enquanto espectando (volta ao sair do spectate).
+	local deathScreen = self:_getDeathScreenController()
+	if deathScreen then
+		deathScreen:SetScreenEnabled(false)
+	end
 
-	RunService:BindToRenderStep(SPECTATE_RENDER_NAME, Enum.RenderPriority.Camera.Value + 1, function()
-		self:_updateSpectateCamera(camera)
-	end)
+	-- Usa a CAMERA PADRAO do Roblox: apenas apontamos o CameraSubject para o Humanoid do alvo.
+	-- Assim o player orbita a camera e da zoom livremente (com colisao de parede/Popper), SEM
+	-- RenderStep posicionando a camera (nada de camera "presa" ao alvo).
+	local camera = Workspace.CurrentCamera
+	camera.CameraType = Enum.CameraType.Custom
+	LocalPlayer.CameraMode = Enum.CameraMode.Classic
+	-- Zoom limitado: min > 1 impede 1a pessoa; max limita o zoom out.
+	LocalPlayer.CameraMinZoomDistance = SPECTATE_MIN_ZOOM
+	LocalPlayer.CameraMaxZoomDistance = SPECTATE_MAX_ZOOM
+
+	self:_applySpectateSubject()
 end
 
-function DownedController:_updateSpectateCamera(camera: Camera)
+-- Desconecta os watchers do alvo atual.
+function DownedController:_clearSpectateTargetConns()
+	for _, conn in ipairs(self.SpectateTargetConns) do
+		conn:Disconnect()
+	end
+	self.SpectateTargetConns = {}
+end
+
+-- Aponta o CameraSubject para o Humanoid do alvo atual (a camera padrao cuida de orbita/zoom/
+-- colisao). Monitora o alvo: se ele morrer (State -> "Dead") ou seu personagem sair, avanca
+-- automaticamente para o proximo. Nao usa RenderStep.
+function DownedController:_applySpectateSubject()
+	self:_clearSpectateTargetConns()
+
 	local target = self.SpectateTargets[self.SpectateIndex]
 	local character = target and target.Character
-	local root = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
-	if not root then
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not target or not character or not humanoid then
 		return
 	end
-	-- Camera fixa atras e um pouco acima do alvo, olhando para ele.
-	local base = root.CFrame * CFrame.new(0, SPECTATE_CAM_HEIGHT, SPECTATE_CAM_DISTANCE)
-	local lookAt = root.Position + Vector3.new(0, SPECTATE_CAM_HEIGHT * 0.5, 0)
-	camera.CFrame = CFrame.lookAt(base.Position, lookAt)
+
+	Workspace.CurrentCamera.CameraSubject = humanoid
+
+	table.insert(self.SpectateTargetConns, character:GetAttributeChangedSignal("State"):Connect(function()
+		if self.Spectating and character:GetAttribute("State") == "Dead" then
+			self:_cycleSpectate(1)
+		end
+	end))
+	table.insert(self.SpectateTargetConns, target.CharacterRemoving:Connect(function()
+		if self.Spectating then
+			self:_cycleSpectate(1)
+		end
+	end))
 end
 
 function DownedController:_exitSpectate()
@@ -367,15 +581,46 @@ function DownedController:_exitSpectate()
 	end
 	self.Spectating = false
 
-	RunService:UnbindFromRenderStep(SPECTATE_RENDER_NAME)
+	self:_clearSpectateTargetConns()
 
 	local gui = self.SpectateGui
 	if gui then
 		gui.Enabled = false
 	end
 
+	-- Sair do spectate: religa a DeathScreen (pronta para o estado atual/mortes futuras). O
+	-- DeathScreenController reprocessa o estado no respawn/revive (Alive esconde o DiedInfo).
+	local deathScreen = self:_getDeathScreenController()
+	if deathScreen then
+		deathScreen:SetScreenEnabled(true)
+	end
+
+	-- Restaura a camera para o proprio player. A camera padrao ja reaponta o subject ao respawnar,
+	-- mas garantimos aqui; os limites de zoom sao redefinidos pelo _exitDead (1a pessoa) no respawn.
 	local camera = Workspace.CurrentCamera
 	camera.CameraType = Enum.CameraType.Custom
+	local ownCharacter = LocalPlayer.Character
+	local ownHumanoid = ownCharacter and ownCharacter:FindFirstChildOfClass("Humanoid")
+	if ownHumanoid then
+		camera.CameraSubject = ownHumanoid
+	end
+end
+
+-- API publica para a DeathScreen: entra em spectate SO se o player estiver morto (o botao
+-- Spectate da DeathScreen chama isto). _enterSpectate ja ignora chamadas repetidas.
+function DownedController:EnterSpectate()
+	if self.CurrentClientState ~= "Dead" then
+		return
+	end
+	self:_enterSpectate()
+end
+
+function DownedController:ExitSpectate()
+	self:_exitSpectate()
+end
+
+function DownedController:IsSpectating(): boolean
+	return self.Spectating
 end
 
 
@@ -400,13 +645,23 @@ function DownedController:_onStateChanged(newState: string?)
 		if previous == "Downed" then
 			self:_exitDowned()
 		end
-		self:_enterSpectate()
+		-- O spectate NAO e mais ativado automaticamente na morte: o player entra nele so ao
+		-- clicar no botao Spectate da DeathScreen (DeathScreenController -> :EnterSpectate).
+		-- Desativa viewmodel + hotbar (revertidos no respawn via _exitDead). Roda DEPOIS do
+		-- _exitDowned (que religa o viewmodel), garantindo o estado final pausado.
+		self:_enterDead()
 	else -- "Alive"
 		if self.Spectating then
 			self:_exitSpectate()
 		end
 		if previous == "Downed" then
 			self:_exitDowned()
+			-- Levantado: religa a Hotbar (desativada no _enterDowned). Feito aqui, e nao no
+			-- _exitDowned, para NAO religar no caminho Downed -> Dead.
+			local hotbar = self:_getHotbarController()
+			if hotbar then
+				hotbar:SetHotbarEnabled(true)
+			end
 		end
 	end
 end
@@ -422,6 +677,12 @@ function DownedController:_bindCharacter(character: Model)
 	if self.Spectating then
 		self:_exitSpectate()
 	end
+
+	-- Respawn: reverte os efeitos de morte (religa viewmodel + hotbar), se estavam ativos.
+	self:_exitDead()
+
+	-- Garante que a barra de downed nao fique pendurada de um estado anterior.
+	self:_stopDownedBar()
 
 	self.StateConnection = character:GetAttributeChangedSignal("State"):Connect(function()
 		self:_onStateChanged(character:GetAttribute("State"))

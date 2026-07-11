@@ -361,7 +361,9 @@ function Viewmodel:SetFreeMouse(enabled: boolean)
 	self.FreeMouse = enabled
 
 	if enabled then
-		-- Libera o mouse e restaura o ícone/cursor padrão
+		-- Libera o mouse e restaura o ícone/cursor padrão. (Nao mexe no zoom da camera: quem
+		-- precisa sair da 1a pessoa para o cursor nao ser re-travado no centro cuida disso — ex.:
+		-- o DownedController força 3a pessoa na morte.)
 		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 		UserInputService.MouseIconEnabled = true
 	else

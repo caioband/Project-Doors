@@ -1,6 +1,22 @@
 local Players = game:GetService("Players")
 
--- Players.CharacterAutoLoads = false
+-- CharacterAutoLoads esta desativado (setado na propriedade do Players). Carregamos o personagem
+-- manualmente ao entrar: assim controlamos o momento do spawn (ex.: so apos loading/menu). Cada
+-- LoadCharacter e isolado para que uma falha com um player nao impeca os demais de spawnar.
+local function LoadPlayerCharacter(player: Player)
+    local ok, err = pcall(function()
+        player:LoadCharacter()
+    end)
+    if not ok then
+        warn(string.format("[Services] Falha ao carregar personagem de '%s': %s", player.Name, tostring(err)))
+    end
+end
+
+-- Players que ja entraram antes deste script rodar (hot-reload/boot) + os que entrarem depois.
+for _, player in ipairs(Players:GetPlayers()) do
+    task.spawn(LoadPlayerCharacter, player)
+end
+Players.PlayerAdded:Connect(LoadPlayerCharacter)
 
 local servicesFolder = script
 local services = {}

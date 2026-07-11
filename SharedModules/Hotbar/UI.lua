@@ -15,16 +15,40 @@ local ItemIcons = {
 
 
 local PlayerGui = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
-local HotbarUI = PlayerGui:WaitForChild("SharedGuis"):WaitForChild("Hotbar")
-local HotbarFrame = HotbarUI:WaitForChild("Frame")
 
--- Os dois layouts da hotbar:
+-- Nome do container de cada layout dentro de Hotbar.Frame:
 -- - Desktop: a ImageLabel (anel) com slots posicionados manualmente (teclado/controle).
 -- - Mobile: a Frame "Mobile" com slots arranjados por UIListLayout (toque).
-local Containers = {
-    Desktop = HotbarFrame:WaitForChild("ImageLabel"),
-    Mobile = HotbarFrame:WaitForChild("Mobile"),
+local ContainerNames = {
+    Desktop = "ImageLabel",
+    Mobile = "Mobile",
 }
+
+-- A ScreenGui Hotbar e RECRIADA a partir de StarterGui quando o player respawna (ResetOnSpawn do
+-- template — que nao da para desligar so na copia). Isso invalidaria qualquer referencia cacheada
+-- (Frame/Containers/Slots), gerando o warning "Hotbar slot UI element not found for slot number: N"
+-- e quebrando a hotbar. Por isso resolvemos a GUI SOB DEMANDA (mesmo padrao que o RoundController
+-- usa com a GeneralUis), com um cache leve que se auto-invalida quando a instancia perde o Parent.
+local cachedScreen: Instance? = nil
+local cachedFrame: Instance? = nil
+
+local function getHotbarScreen(): Instance?
+    if cachedScreen and cachedScreen.Parent then
+        return cachedScreen
+    end
+    local sharedGuis = PlayerGui:FindFirstChild("SharedGuis")
+    cachedScreen = sharedGuis and sharedGuis:FindFirstChild("Hotbar")
+    return cachedScreen
+end
+
+local function getHotbarFrame(): Instance?
+    if cachedFrame and cachedFrame.Parent then
+        return cachedFrame
+    end
+    local screen = getHotbarScreen()
+    cachedFrame = screen and screen:FindFirstChild("Frame")
+    return cachedFrame
+end
 
 UI.ActiveLayout = "Desktop"
 
@@ -38,7 +62,12 @@ local OriginalColors = {}
 local SlotButtonState = {}
 
 local function getContainer(layout: string?)
-    return Containers[layout or UI.ActiveLayout]
+    local frame = getHotbarFrame()
+    if not frame then
+        return nil
+    end
+    local name = ContainerNames[layout or UI.ActiveLayout]
+    return name and frame:FindFirstChild(name)
 end
 
 local function getSlot(slotNumber: number, layout: string?)
@@ -63,7 +92,23 @@ local function disableContainerButtons(container)
 end
 
 function UI:Render()
-    HotbarUI.Enabled = true
+    -- Usa WaitForChild (nao FindFirstChild) porque o :Render roda no boot e a ScreenGui pode
+    -- ainda nao ter replicado do StarterGui: sem esperar, o Enabled=true nunca era aplicado e a
+    -- hotbar ficava invisivel. Como agora a Hotbar tem ResetOnSpawn=false (mesma instancia por toda
+    -- a sessao), esperar aqui liga uma vez e ela permanece ligada. Prime o cache de getHotbarScreen.
+    local sharedGuis = PlayerGui:WaitForChild("SharedGuis")
+    local screen = sharedGuis:WaitForChild("Hotbar")
+    cachedScreen = screen
+    screen.Enabled = true
+end
+
+-- Liga/desliga a visibilidade da ScreenGui da Hotbar (usado ao desativar na morte / religar no
+-- respawn). Resolve a GUI sob demanda (o cache se auto-invalida se a instancia perdeu o Parent).
+function UI:SetScreenEnabled(enabled: boolean)
+    local screen = getHotbarScreen()
+    if screen then
+        screen.Enabled = enabled
+    end
 end
 
 -- Alterna entre o layout padrao (Desktop) e o de toque (Mobile): mostra o container alvo,
@@ -75,11 +120,14 @@ function UI:SetActiveLayout(isMobile: boolean): boolean
     end
 
     self.ActiveLayout = target
-    for name, container in pairs(Containers) do
-        local active = name == target
-        container.Visible = active
-        if not active then
-            disableContainerButtons(container)
+    for name in pairs(ContainerNames) do
+        local container = getContainer(name)
+        if container then
+            local active = name == target
+            container.Visible = active
+            if not active then
+                disableContainerButtons(container)
+            end
         end
     end
     return true

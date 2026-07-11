@@ -276,6 +276,16 @@ function HotbarHandler:Start()
     registerItemCallbacks()
 end
 
+-- Liga/desliga a Hotbar inteira (UI + binds). Chamado pelo DownedController: desativa na morte
+-- real do player e reativa no respawn.
+function HotbarHandler:SetHotbarEnabled(enabled: boolean)
+    if enabled then
+        Hotbar:Enable()
+    else
+        Hotbar:Disable()
+    end
+end
+
 -- Adiciona um item comprado na loja ao primeiro slot livre da Hotbar.
 -- Retorna o numero do slot usado, ou nil se a Hotbar estiver cheia.
 function HotbarHandler:AddItem(item): number?
