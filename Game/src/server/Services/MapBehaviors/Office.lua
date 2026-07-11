@@ -20,6 +20,7 @@
 -- ctx (BehaviorContext): ver RoundService. ctx.Connections desconecta tudo no UnloadMap.
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
 
 local Office = {}
 
@@ -30,6 +31,53 @@ local PASSWORD_LENGTH = 4
 -- Quantidade de telefones que tocam (so o Ring) na falha, e por quanto tempo (s).
 local FAILURE_RING_COUNT = 10
 local FAILURE_RING_TIME = 30
+-- Duracao (s) do fechamento das portas do elevador na fase de fuga (OnEscapeEnd).
+local DOOR_CLOSE_TIME = 2.2
+
+
+-- Resolve um caminho aninhado a partir de uma instancia raiz (nil se algum no faltar).
+local function resolve(root: Instance?, ...: string): Instance?
+    local current = root
+    for _, name in { ... } do
+        if not current then
+            return nil
+        end
+        current = current:FindFirstChild(name)
+    end
+    return current
+end
+
+
+-- Fecha as duas portas do elevador simultaneamente: cada porta (BasePart anchored em
+-- ctx.Map.Model.Elevator.Doors) recebe um tween de CFrame ate o seu atributo ClosedCFrame. Bloqueia
+-- ate as portas terminarem de fechar. No-op silencioso se as portas/atributos nao existirem.
+local function closeElevatorDoors(map: Model)
+    local doorsModel = resolve(map, "Model", "Elevator", "Doors")
+    if not doorsModel then
+        warn("[Office:server] Elevator.Doors nao encontrado; portas nao fecharam")
+        return
+    end
+
+    -- Som do elevador fechando (AudioPlayer autorado dentro do Doors; toca no server -> replica).
+    local audio = doorsModel:FindFirstChildWhichIsA("AudioPlayer")
+    if audio then
+        audio:Play()
+    end
+
+    local info = TweenInfo.new(DOOR_CLOSE_TIME, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut)
+    local closedAny = false
+    for _, door in ipairs(doorsModel:GetChildren()) do
+        local closedCFrame = door:GetAttribute("ClosedCFrame")
+        if door:IsA("BasePart") and typeof(closedCFrame) == "CFrame" then
+            TweenService:Create(door, info, { CFrame = closedCFrame }):Play()
+            closedAny = true
+        end
+    end
+
+    if closedAny then
+        task.wait(DOOR_CLOSE_TIME)
+    end
+end
 
 -- Remotes do puzzle do Office (criados sob demanda; persistem entre loads).
 local StartPhonePuzzleRemote: RemoteEvent
@@ -335,6 +383,23 @@ function Office.OnLoad(ctx)
     -- Apos a animacao de falha: varios telefones aleatorios tocam (so o Ring) por ~30s.
     ctx.Connections:Connect(ctx.Map, "OfficeStartFailureRing", StartFailureRingRemote.OnServerEvent, function(_player: Player)
         playFailureRing()
+    end)
+end
+
+-- Chamado pelo RoundService quando o COUNTDOWN da fuga acaba (ver RoundService.RunEscapePhase). O
+-- Office fecha as DUAS portas do elevador simultaneamente (tween de CFrame ate o atributo
+-- ClosedCFrame de cada porta) e, com elas fechadas, faz a transicao de tela (fade in/out) teleportando
+-- os players de volta para a VotingRoom no meio (tela preta) — igual a transicao votacao->mapa.
+-- BLOQUEIA ate o teleporte concluir (o RoundService descarrega o mapa logo depois). Os NPCs NAO sao
+-- parados aqui: continuam ativos ate o OnUnload (ClearForMap).
+function Office.OnEscapeEnd(ctx)
+    print(string.format("[Office:server] OnEscapeEnd (loadId=%d) - fechando elevador e teleportando", ctx.LoadId))
+
+    closeElevatorDoors(ctx.Map)
+
+    local RoundService = ctx.GetService("RoundService")
+    RoundService:PlayEscapeTransition(function()
+        RoundService:TeleportPlayersToVotingRoom()
     end)
 end
 

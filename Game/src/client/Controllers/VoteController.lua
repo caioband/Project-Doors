@@ -460,7 +460,9 @@ end
 -- (clareia). O servidor teleporta os players no meio (tela totalmente preta, apos o fade-in).
 -- onFadeInComplete: callback disparado quando a tela esta totalmente preta (fade-in completo,
 -- antes do fade-out). E rodado em uma thread propria para NAO yieldar/atrasar o fade-out.
-function VoteController:PlayTransition(fadeIn: number?, fadeOut: number?, onFadeInComplete: (() -> ())?)
+-- skipInitialSounds: quando true, NAO toca os InitialSounds do mapa no fade-out (usado pela
+-- transicao de fuga, que revela a VotingRoom e nao o mapa).
+function VoteController:PlayTransition(fadeIn: number?, fadeOut: number?, onFadeInComplete: (() -> ())?, skipInitialSounds: boolean?)
     local fadeInTime = tonumber(fadeIn) or 5
     local fadeOutTime = tonumber(fadeOut) or 5
 
@@ -502,7 +504,9 @@ function VoteController:PlayTransition(fadeIn: number?, fadeOut: number?, onFade
         TweenService:Create(frame, TweenInfo.new(fadeOutTime, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut), {
             BackgroundTransparency = 1,
         }):Play()
-        self:PlayInitialSounds()
+        if not skipInitialSounds then
+            self:PlayInitialSounds()
+        end
         task.wait(fadeOutTime)
 
         frame:Destroy()
