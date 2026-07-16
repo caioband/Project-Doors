@@ -72,6 +72,338 @@ function Office.OnLoad(ctx)
         end
     end
 
+    -- Dispara um remote client->server do puzzle do Office pelo nome (resolve sob demanda; o
+    -- server cria os remotes apos a barreira de prontidao).
+    local function fireOfficeServer(remoteName: string)
+        local comms = ReplicatedStorage:FindFirstChild("Comms")
+        local office = comms and comms:FindFirstChild("Office")
+        local remote = office and office:FindFirstChild(remoteName)
+        if remote and remote:IsA("RemoteEvent") then
+            remote:FireServer()
+        end
+    end
+
+    -- Tablet ("Servers"): ao acionar o ProximityPrompt do Screen, traz o conteudo da SurfaceGui para
+    -- o monitor fullscreen (MonitorsGUI) via MonitorScreenController e toca a animacao de startup do
+    -- Cascade ("ServerTabletStartup") no clone. Na PRIMEIRA ativacao (gate no server), pede que TODOS
+    -- os clientes toquem a mesma animacao no Frame ORIGINAL (world-space) da SurfaceGui, para o tablet
+    -- do mundo tambem "ligar" para todos os players (o Cascade so roda no cliente - RunService.PreRender
+    -- -, entao o server apenas reencaminha o gatilho uma unica vez).
+    do
+        local tabletScreen = resolve(ctx.Map, "Model", "Tablet", "Screen")
+        local tabletPrompt = tabletScreen and tabletScreen:FindFirstChild("ProximityPrompt") :: ProximityPrompt?
+        local tabletContent = resolve(tabletScreen, "SurfaceGui", "TabletMonitorContent") :: Frame?
+
+        if tabletPrompt and tabletContent then
+            local monitorScreen = ctx.GetController("MonitorScreenController")
+            -- Guarda contra reentrada: enquanto o tablet estiver aberto, novos Triggered sao ignorados
+            -- (so reabre depois que o BackButton fecha).
+            local tabletOpen = false
+
+            -- Toca "Server_Show" em lote (Stagger 0.2) em cada Server do RoomVisualizer de `root`,
+            -- fazendo-os aparecer um apos o outro. `root` pode ser o clone (MonitorsGUI) ou o Frame
+            -- ORIGINAL (world-space) da SurfaceGui.
+            local function playServerShow(root: Instance)
+                local serversContainer = resolve(root, "RoomVisualizer", "Servers")
+                if not serversContainer then
+                    return
+                end
+                local serverFrames = {}
+                for _, child in serversContainer:GetChildren() do
+                    if child:IsA("GuiObject") then
+                        table.insert(serverFrames, child)
+                    end
+                end
+                if #serverFrames > 0 then
+                    monitorScreen:PlayAnimationBatch(serverFrames, "Server_Show", { Stagger = 0.2 })
+                end
+            end
+
+            -- ===== Estado dos servidores (backend autoritativo, refletido na UI) =====
+            -- Cada modelo em ctx.Map.Servers.ServerN carrega o atributo replicado "State"
+            -- ('Off' | 'Booting' | 'On'), setado pelo server. A UI (clone no MonitorsGUI e o Frame
+            -- world-space) reflete a cor de cada servidor e um Status agregado do sistema.
+            local STATE_COLORS = {
+                Off = Color3.fromRGB(255, 0, 0),        -- vermelho (inclui servidor que falhou no envio)
+                Booting = Color3.fromRGB(255, 255, 0),  -- amarelo
+                On = Color3.fromRGB(0, 255, 0),         -- verde
+            }
+            local DEFAULT_STATE = "Off"
+
+            -- Cor da barra de progresso quando o envio esta pausado por falha de servidor.
+            local BAR_FAIL_COLOR = Color3.fromRGB(255, 0, 0)
+            -- Cor de repouso da barra, capturada do template para respeitar o design original.
+            local barBaseColor = Color3.fromRGB(122, 122, 122)
+            do
+                local baseBar = resolve(tabletContent, "ButtonContainer", "ProgressBar", "Bar")
+                if baseBar and baseBar:IsA("GuiObject") then
+                    barBaseColor = baseBar.BackgroundColor3
+                end
+            end
+
+            -- Modelos dos servidores, indexados pelo numero do nome (Server1 -> 1).
+            local serverModels: { [number]: Instance } = {}
+            local serversFolder = ctx.Map:FindFirstChild("Servers")
+            if serversFolder then
+                for _, model in serversFolder:GetChildren() do
+                    local num = tonumber(string.match(model.Name, "%d+"))
+                    if num then
+                        serverModels[num] = model
+                    end
+                end
+            end
+
+            -- Estado individual de um servidor (atributo replicado do modelo; default 'Off').
+            local function getServerState(num: number): string
+                local model = serverModels[num]
+                local state = model and model:GetAttribute("State")
+                return if typeof(state) == "string" then state else DEFAULT_STATE
+            end
+
+            -- Estado agregado do sistema: o "pior" estado vence (Off > Booting > On). Se algum
+            -- servidor esta Off, o sistema esta Off; senao, se algum esta Booting, Booting; senao On.
+            local function getSystemState(): string
+                local anyBooting = false
+                local hasAny = false
+                for num in serverModels do
+                    hasAny = true
+                    local s = getServerState(num)
+                    if s == "Off" then
+                        return "Off"
+                    elseif s == "Booting" then
+                        anyBooting = true
+                    end
+                end
+                if not hasAny then
+                    return DEFAULT_STATE
+                end
+                return if anyBooting then "Booting" else "On"
+            end
+
+            -- Colore cada Server da UI de `root` conforme o estado do seu respectivo modelo (casa o
+            -- numero do ServerNumber com o do modelo).
+            local function refreshServersUI(root: Instance)
+                local serversContainer = resolve(root, "RoomVisualizer", "Servers")
+                if not serversContainer then
+                    return
+                end
+                for _, frame in serversContainer:GetChildren() do
+                    if frame:IsA("GuiObject") then
+                        local label = frame:FindFirstChild("ServerNumber")
+                        local num = label and label:IsA("TextLabel") and tonumber(label.Text)
+                        if num then
+                            frame.BackgroundColor3 = STATE_COLORS[getServerState(num)] or STATE_COLORS.Off
+                        end
+                    end
+                end
+            end
+
+            -- Atualiza a Status (texto + cor) e o ActionButton (texto + visibilidade) conforme o
+            -- sistema. O botao some enquanto o sistema esta ligando (Booting) ou enquanto o envio de
+            -- dados esta em andamento/concluido. Com o sistema 'On', o texto vira "Send Data".
+            local function refreshStatusUI(root: Instance)
+                local systemState = getSystemState()
+                local color = STATE_COLORS[systemState] or STATE_COLORS.Off
+                local status = resolve(root, "ButtonContainer", "Status")
+                if status and status:IsA("TextLabel") then
+                    status.Text = systemState
+                    status.TextColor3 = color
+                end
+                local actionBtn = resolve(root, "ButtonContainer", "ActionButton")
+                if actionBtn and actionBtn:IsA("TextButton") then
+                    local sendState = tabletScreen:GetAttribute("SendState")
+                    local sending = sendState == "Active" or sendState == "Done"
+                    if systemState == "Booting" or sending then
+                        actionBtn.Visible = false
+                    else
+                        actionBtn.Visible = true
+                        actionBtn.Text = if systemState == "On" then "Send Data" else "Turn Systems On"
+                    end
+                end
+            end
+
+            -- Reflete o envio de dados na UI de `root`: mostra/esconde a ProgressBar, preenche a Bar
+            -- (X.Scale = progresso 0..1) e pinta de vermelho quando pausado por falha de servidor.
+            local function refreshSendUI(root: Instance)
+                local progressBar = resolve(root, "ButtonContainer", "ProgressBar")
+                if not (progressBar and progressBar:IsA("GuiObject")) then
+                    return
+                end
+                local sendState = tabletScreen:GetAttribute("SendState")
+                progressBar.Visible = sendState == "Active" or sendState == "Done"
+
+                local bar = progressBar:FindFirstChild("Bar")
+                if bar and bar:IsA("GuiObject") then
+                    local progress = tabletScreen:GetAttribute("SendProgress")
+                    progress = if typeof(progress) == "number" then math.clamp(progress, 0, 1) else 0
+                    local y = bar.Size.Y
+                    bar.Size = UDim2.new(progress, 0, y.Scale, y.Offset)
+                    local failed = tabletScreen:GetAttribute("SendFailed") == true
+                    bar.BackgroundColor3 = if failed then BAR_FAIL_COLOR else barBaseColor
+                end
+            end
+
+            -- Atualiza toda a UI (servers + status + envio) de um root, se existir e estiver na arvore.
+            local function refreshRoot(root: Instance?)
+                if root and root.Parent then
+                    refreshServersUI(root)
+                    refreshStatusUI(root)
+                    refreshSendUI(root)
+                end
+            end
+
+            -- Atualiza o clone no MonitorsGUI (se aberto) e o Frame ORIGINAL (world-space).
+            local function refreshAll()
+                refreshRoot(monitorScreen:GetContent(tabletContent.Name))
+                refreshRoot(tabletContent)
+            end
+
+            -- Liga/desliga o loop do LoadingStick (Cascade "LoadingStick_Anim") num root conforme o
+            -- envio esteja ativo. Tocar durante o envio; parar caso contrario.
+            local function applyLoadingStick(root: Instance?)
+                if not (root and root.Parent) then
+                    return
+                end
+                local ls = resolve(root, "ButtonContainer", "ProgressBar", "TextContainer", "LoadingStick")
+                if not ls then
+                    return
+                end
+                if tabletScreen:GetAttribute("SendState") == "Active" then
+                    monitorScreen:PlayAnimation(ls, "LoadingStick_Anim")
+                else
+                    monitorScreen:StopAnimation(ls)
+                end
+            end
+            local function updateLoadingStick()
+                applyLoadingStick(monitorScreen:GetContent(tabletContent.Name))
+                applyLoadingStick(tabletContent)
+            end
+
+            -- Reflete cada mudanca de estado (atributo replicado) na UI. Roda em todos os clientes,
+            -- entao o Frame world-space acompanha o estado para quem estiver olhando o tablet do mundo.
+            for num, model in serverModels do
+                ctx.Connections:Connect(ctx.Map, "OfficeServerState" .. num, model:GetAttributeChangedSignal("State"), refreshAll)
+            end
+
+            -- Atributos replicados do envio de dados (setados pelo server em ctx.Map.Model.Tablet.Screen).
+            ctx.Connections:Connect(ctx.Map, "OfficeSendProgress", tabletScreen:GetAttributeChangedSignal("SendProgress"), refreshAll)
+            ctx.Connections:Connect(ctx.Map, "OfficeSendFailed", tabletScreen:GetAttributeChangedSignal("SendFailed"), refreshAll)
+            ctx.Connections:Connect(ctx.Map, "OfficeSendState", tabletScreen:GetAttributeChangedSignal("SendState"), function()
+                refreshAll()
+                updateLoadingStick()
+            end)
+
+            -- Estado inicial na UI (em thread propria: getMonitorsGui usa WaitForChild e nao pode
+            -- bloquear o OnLoad/MapReady).
+            task.spawn(refreshAll)
+
+            ctx.Connections:Connect(ctx.Map, "OfficeTabletPrompt", tabletPrompt.Triggered, function()
+                if tabletOpen then
+                    return
+                end
+                tabletOpen = true
+
+                -- Traz o conteudo do tablet para o monitor fullscreen. Se o clone ja estava la (mesmo
+                -- nome), so reabre (fresh=false, sem re-animar); senao clona e toca o startup.
+                local clone, startupSignal, fresh = monitorScreen:ShowFrame(tabletContent, "ServerTabletStartup")
+                if fresh then
+                    -- Espelha o startup no Frame ORIGINAL (world-space) da SurfaceGui para o proprio
+                    -- ativador (writes de Cascade num instance server sao locais, entao so ele ve): o
+                    -- clone e o tablet do mundo animam em paralelo.
+                    monitorScreen:PlayAnimation(tabletContent, "ServerTabletStartup")
+                    -- E pede ao server para reencaminhar o startup aos DEMAIS players (uma unica vez).
+                    fireOfficeServer("PlayTabletStartup")
+                end
+
+                -- Com o Frame ja todo na PlayerGui, libera os botoes ActionButton e BackButton.
+                local actionButton = resolve(clone, "ButtonContainer", "ActionButton") :: TextButton?
+                local backButton = clone:FindFirstChild("BackButton") :: TextButton?
+                if actionButton then
+                    actionButton.Interactable = true
+                    actionButton.Active = true
+                    -- Clicar depende do estado do sistema: com 'Off' inicia o boot dos servidores;
+                    -- com 'On' (botao "Send Data") inicia o envio de dados. O backend decide tudo.
+                    ctx.Connections:Connect(ctx.Map, "OfficeTabletAction", actionButton.Activated, function()
+                        local systemState = getSystemState()
+                        if systemState == "On" then
+                            fireOfficeServer("StartSendData")
+                        elseif systemState == "Off" then
+                            fireOfficeServer("StartServerBoot")
+                        end
+                    end)
+                end
+                if backButton then
+                    backButton.Interactable = true
+                    backButton.Active = true
+                end
+
+                -- Reflete o estado atual (servidores + envio) na UI recem-exibida e liga o LoadingStick
+                -- caso um envio ja esteja em andamento.
+                refreshAll()
+                updateLoadingStick()
+
+                -- Ancora o personagem e libera o mouse (visivel, para clicar nos botoes) enquanto o
+                -- tablet estiver aberto.
+                local character = Players.LocalPlayer.Character
+                local hrp = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
+                if hrp then
+                    hrp.Anchored = true
+                end
+                local viewmodel = ctx.GetController("ViewmodelController"):GetViewmodel()
+                if viewmodel then
+                    viewmodel:SetFreeMouse(true)
+                end
+
+                -- BackButton: fecha o tablet -> desancora o personagem, retrava o mouse e apenas
+                -- ESCONDE o MonitorsGUI (Hide nao apaga o clone; ele fica para ser reaproveitado na
+                -- proxima abertura). A decisao de apagar/re-clonar fica no Triggered, via :ShowFrame.
+                if backButton then
+                    ctx.Connections:Connect(ctx.Map, "OfficeTabletBack", backButton.Activated, function()
+                        if not tabletOpen then
+                            return
+                        end
+                        tabletOpen = false
+                        if hrp then
+                            hrp.Anchored = false
+                        end
+                        if viewmodel then
+                            viewmodel:SetFreeMouse(false)
+                        end
+                        monitorScreen:Hide()
+                    end)
+                end
+
+                -- Quando o startup TERMINAR, toca "Server_Show" em lote tanto no clone (MonitorsGUI)
+                -- quanto no Frame ORIGINAL (world-space) da SurfaceGui, para os Servers aparecerem um
+                -- a um nos dois para o ativador.
+                if startupSignal then
+                    startupSignal:Connect(function(event)
+                        if event ~= "Completed" then
+                            return
+                        end
+                        playServerShow(clone)
+                        playServerShow(tabletContent)
+                    end)
+                end
+            end)
+
+            -- Reencaminhado pelo server na primeira ativacao: toca a animacao de startup no Frame
+            -- ORIGINAL (world-space) da SurfaceGui do tablet. O remote so existe apos a barreira de
+            -- prontidao, entao a conexao e feita de forma assincrona (nao trava o MapReady).
+            task.spawn(function()
+                local comms = ReplicatedStorage:WaitForChild("Comms", 30)
+                local office = comms and comms:WaitForChild("Office", 30)
+                local playTabletStartup = office and office:WaitForChild("PlayTabletStartup", 30)
+                if not playTabletStartup or not ctx.Map.Parent then
+                    return
+                end
+                ctx.Connections:Connect(ctx.Map, "OfficeWorldTabletStartup", playTabletStartup.OnClientEvent, function()
+                    monitorScreen:PlayAnimation(tabletContent, "ServerTabletStartup")
+                end)
+            end)
+        end
+    end
+
     local managerPC = resolve(ctx.Map, "Model", "ManagerPC")
     if not managerPC then
         warn("[Office:client] ManagerPC nao encontrado no mapa")
@@ -223,17 +555,6 @@ function Office.OnLoad(ctx)
 
     if backButton then
         ctx.Connections:Connect(ctx.Map, "OfficeBackButton", backButton.Activated, exitMonitor)
-    end
-
-    -- Dispara um remote client->server do puzzle do Office pelo nome (resolve sob demanda; o
-    -- server cria os remotes apos a barreira de prontidao).
-    local function fireOfficeServer(remoteName: string)
-        local comms = ReplicatedStorage:FindFirstChild("Comms")
-        local office = comms and comms:FindFirstChild("Office")
-        local remote = office and office:FindFirstChild(remoteName)
-        if remote and remote:IsA("RemoteEvent") then
-            remote:FireServer()
-        end
     end
 
     -- Sequencia de falha (tentativas esgotadas): toca "YOU FAILED" e depois "RUN" com efeito

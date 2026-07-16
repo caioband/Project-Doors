@@ -21,6 +21,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
+local Players = game:GetService("Players")
 
 local Office = {}
 
@@ -90,6 +91,15 @@ local PlayPasswordVoiceRemote: RemoteEvent
 local AddPuzzleErrorRemote: RemoteEvent
 -- Cliente sinaliza (apos a animacao de falha) para spawnar a Secretary cacadora.
 local SpawnSecretaryRemote: RemoteEvent
+-- Cliente sinaliza a primeira ativacao do tablet; o server reencaminha (uma vez) para todos os
+-- clientes tocarem a animacao de startup no Frame ORIGINAL da SurfaceGui do tablet.
+local PlayTabletStartupRemote: RemoteEvent
+-- Cliente clica no ActionButton do tablet: inicia o boot dos servidores (todos -> 'Booting', e
+-- cada um -> 'On' apos uma duracao aleatoria).
+local StartServerBootRemote: RemoteEvent
+-- Cliente clica em "Send Data" (sistema 'On'): inicia o envio de dados (barra de progresso de 1min,
+-- com chance de servidores falharem no meio e precisarem de reboot fisico).
+local StartSendDataRemote: RemoteEvent
 
 
 -- Garante a hierarquia ReplicatedStorage.Comms.Office e os Remotes do puzzle.
@@ -127,7 +137,24 @@ local function EnsureRemotes()
     PlayPasswordVoiceRemote = ensure("PlayPasswordVoice")
     AddPuzzleErrorRemote = ensure("AddPuzzleError")
     SpawnSecretaryRemote = ensure("SpawnSecretary")
+    PlayTabletStartupRemote = ensure("PlayTabletStartup")
+    StartServerBootRemote = ensure("StartServerBoot")
+    StartSendDataRemote = ensure("StartSendData")
 end
+
+-- Duracao (s) aleatoria [min, max] para cada servidor sair de 'Booting' para 'On'.
+local SERVER_BOOT_MIN = 15
+local SERVER_BOOT_MAX = 20
+
+-- Envio de dados ("Send Data"): duracao total (s) de progresso (so conta tempo RODANDO, pausas nao).
+local SEND_TOTAL_TIME = 60
+-- Chance (~por segundo de progresso) de um servidor falhar no meio do envio, e o progresso a partir
+-- do qual nao ha mais falhas (para o envio sempre poder concluir).
+local SEND_FAIL_CHANCE_PER_SEC = 0.04
+local SEND_FAIL_MAX_PROGRESS = 0.9
+-- Reboot de um servidor com falha: hold (s) do ProximityPrompt e duracao (s) do "rebooting".
+local SERVER_REBOOT_HOLD = 1
+local SERVER_REBOOT_TIME = 3
 
 
 -- Gera uma senha numerica de PASSWORD_LENGTH digitos (cada digito 0-9).
@@ -167,6 +194,173 @@ function Office.OnLoad(ctx)
         end
         secretarySpawned = true
         NPCService:SpawnHunter(ctx.Map, "Secretary", player)
+    end)
+
+    -- Tablet: a primeira ativacao dispara a animacao de startup no Frame ORIGINAL (world-space) da
+    -- SurfaceGui do tablet para os DEMAIS players (o proprio ativador ja a toca localmente). O Cascade
+    -- so roda no cliente (RunService.PreRender), por isso o server apenas reencaminha o gatilho, uma
+    -- unica vez e excluindo o remetente (senao o ativador re-tocaria e a animacao dele reiniciaria no
+    -- meio, no round-trip). Independente do puzzle dos telefones (fica acima do bloco que retorna cedo).
+    local tabletStartupPlayed = false
+    ctx.Connections:Connect(ctx.Map, "OfficePlayTabletStartup", PlayTabletStartupRemote.OnServerEvent, function(player: Player)
+        if tabletStartupPlayed then
+            return
+        end
+        tabletStartupPlayed = true
+        for _, other in ipairs(Players:GetPlayers()) do
+            if other ~= player then
+                PlayTabletStartupRemote:FireClient(other)
+            end
+        end
+    end)
+
+    -- Estado dos servidores (backend autoritativo). Cada modelo em ctx.Map.Servers.ServerN carrega
+    -- o atributo "State" ('Off' | 'Booting' | 'On'), que replica para os clientes (a UI do tablet
+    -- reflete a cor de cada um e o Status agregado). Comecam em 'Off'.
+    local serverModels = {}
+    local serversFolder = ctx.Map:FindFirstChild("Servers")
+    if serversFolder then
+        for _, model in ipairs(serversFolder:GetChildren()) do
+            if model:IsA("Model") then
+                model:SetAttribute("State", "Off")
+                table.insert(serverModels, model)
+            end
+        end
+    end
+
+    -- ActionButton clicado (uma vez por load): todos os servidores vao para 'Booting' e cada um
+    -- decide uma duracao aleatoria de SERVER_BOOT_MIN..MAX segundos para ligar ('On').
+    local serverBootStarted = false
+    ctx.Connections:Connect(ctx.Map, "OfficeStartServerBoot", StartServerBootRemote.OnServerEvent, function(_player: Player)
+        if serverBootStarted then
+            return
+        end
+        serverBootStarted = true
+        for _, model in ipairs(serverModels) do
+            model:SetAttribute("State", "Booting")
+            task.delay(math.random(SERVER_BOOT_MIN, SERVER_BOOT_MAX), function()
+                if model.Parent then
+                    model:SetAttribute("State", "On")
+                end
+            end)
+        end
+    end)
+
+    -- Envio de dados ("Send Data"). Estado replicado via atributos no Tablet.Screen (a UI do tablet
+    -- reflete): SendState ('Idle'|'Active'|'Done'), SendProgress (0..1), SendFailed (bool, barra
+    -- vermelha enquanto pausado por falha de servidor). O progresso avanca em 1 minuto de tempo
+    -- RODANDO; se um servidor falha no meio, ele para ate o player rebootar aquele servidor.
+    local tabletScreen = resolve(ctx.Map, "Model", "Tablet", "Screen")
+    if tabletScreen then
+        tabletScreen:SetAttribute("SendState", "Idle")
+        tabletScreen:SetAttribute("SendProgress", 0)
+        tabletScreen:SetAttribute("SendFailed", false)
+    end
+
+    -- Cria um ProximityPrompt "Reboot" numa Part qualquer do servidor com falha; ao acionar, roda
+    -- `onReboot` (que reinicia o servidor e retoma o envio). Sem Part, reinicia direto.
+    local function spawnRebootPrompt(model: Instance, onReboot: () -> ())
+        local part = model:FindFirstChildWhichIsA("BasePart", true)
+        if not part then
+            onReboot()
+            return
+        end
+        local prompt = Instance.new("ProximityPrompt")
+        prompt.Name = "RebootPrompt"
+        prompt.ActionText = "Reboot"
+        prompt.ObjectText = model.Name
+        prompt.HoldDuration = SERVER_REBOOT_HOLD
+        prompt.MaxActivationDistance = 10
+        prompt.RequiresLineOfSight = false
+        prompt.Parent = part
+
+        local conn
+        conn = prompt.Triggered:Connect(function()
+            conn:Disconnect()
+            prompt:Destroy()
+            onReboot()
+        end)
+    end
+
+    local sending = false
+    ctx.Connections:Connect(ctx.Map, "OfficeStartSendData", StartSendDataRemote.OnServerEvent, function(_player: Player)
+        if sending or not tabletScreen then
+            return
+        end
+        -- So envia com TODOS os servidores 'On'.
+        for _, model in ipairs(serverModels) do
+            if model:GetAttribute("State") ~= "On" then
+                return
+            end
+        end
+        sending = true
+        tabletScreen:SetAttribute("SendFailed", false)
+        tabletScreen:SetAttribute("SendProgress", 0)
+        tabletScreen:SetAttribute("SendState", "Active")
+
+        task.spawn(function()
+            local elapsed = 0             -- tempo RODANDO acumulado (pausas por falha nao contam)
+            local pushAccum = 0           -- acumulador p/ empurrar SendProgress ~10Hz
+            local failCheckAccum = 0      -- acumulador p/ checar falha ~1x/s
+            local failedServer: Instance? = nil  -- servidor em falha atual (pausa o progresso)
+
+            while elapsed < SEND_TOTAL_TIME and ctx.Map.Parent do
+                local dt = task.wait()
+                -- Enquanto houver um servidor em falha, o progresso fica pausado (nao acumula tempo).
+                if failedServer == nil then
+                    elapsed += dt
+                    local progress = math.min(elapsed / SEND_TOTAL_TIME, 1)
+
+                    pushAccum += dt
+                    if pushAccum >= 0.1 or progress >= 1 then
+                        pushAccum = 0
+                        tabletScreen:SetAttribute("SendProgress", progress)
+                    end
+
+                    -- Chance (~1x/s) de um servidor 'On' falhar no meio do envio.
+                    failCheckAccum += dt
+                    if failCheckAccum >= 1 then
+                        failCheckAccum -= 1
+                        if progress < SEND_FAIL_MAX_PROGRESS and math.random() < SEND_FAIL_CHANCE_PER_SEC then
+                            local candidates = {}
+                            for _, model in ipairs(serverModels) do
+                                if model:GetAttribute("State") == "On" then
+                                    table.insert(candidates, model)
+                                end
+                            end
+                            if #candidates > 0 then
+                                local model = candidates[math.random(#candidates)]
+                                failedServer = model
+                                -- Falha = servidor cai para 'Off': o agregado do sistema vira 'Off'
+                                -- (Status vermelho) e o envio fica pausado ate o reboot.
+                                model:SetAttribute("State", "Off")
+                                tabletScreen:SetAttribute("SendFailed", true)
+                                spawnRebootPrompt(model, function()
+                                    -- Player promptou o reboot: "rebooting" (Booting) e, ao concluir,
+                                    -- volta 'On' e retoma o progresso.
+                                    model:SetAttribute("State", "Booting")
+                                    task.delay(SERVER_REBOOT_TIME, function()
+                                        if not ctx.Map.Parent then
+                                            return
+                                        end
+                                        model:SetAttribute("State", "On")
+                                        tabletScreen:SetAttribute("SendFailed", false)
+                                        failedServer = nil
+                                    end)
+                                end)
+                            end
+                        end
+                    end
+                end
+            end
+
+            if ctx.Map.Parent then
+                tabletScreen:SetAttribute("SendProgress", 1)
+                tabletScreen:SetAttribute("SendFailed", false)
+                tabletScreen:SetAttribute("SendState", "Done")
+            end
+            -- `sending` permanece true: o envio e um evento unico por load.
+        end)
     end)
 
     local map = ctx.Map
