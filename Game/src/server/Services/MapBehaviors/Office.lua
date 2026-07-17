@@ -217,13 +217,105 @@ function Office.OnLoad(ctx)
     -- Estado dos servidores (backend autoritativo). Cada modelo em ctx.Map.Servers.ServerN carrega
     -- o atributo "State" ('Off' | 'Booting' | 'On'), que replica para os clientes (a UI do tablet
     -- reflete a cor de cada um e o Status agregado). Comecam em 'Off'.
+    -- Tablet.Screen: onde ficam os atributos replicados do envio de dados (usados aqui pelo audio
+    -- SendData de cada servidor e mais abaixo pela logica do "Send Data").
+    local tabletScreen = resolve(ctx.Map, "Model", "Tablet", "Screen")
+
+    -- Audio por servidor (AudioPlayers em model.Audios, cada um Wired a um AudioEmitter no modelo;
+    -- tocam no server e replicam para todos). Reage as transicoes de estado:
+    --   -> Booting: toca ServerStartBoot 1x; ao terminar, entra em loop no ServerRunningIdle.
+    --   -> On:      nada (o ServerRunningIdle ja esta em loop desde o fim do boot).
+    --   -> Off:     para tudo e toca ServerTurnOff 1x.
+    -- O listener e conectado DEPOIS do 'Off' inicial, entao o load fica silencioso.
+    local function setupServerAudio(model: Instance, index: number)
+        local audios = model:FindFirstChild("Audios")
+        if not audios then
+            return
+        end
+        local boot = audios:FindFirstChild("ServerStartBoot") :: AudioPlayer?
+        local idle = audios:FindFirstChild("ServerRunningIdle") :: AudioPlayer?
+        local turnOff = audios:FindFirstChild("ServerTurnOff") :: AudioPlayer?
+        local sendData = audios:FindFirstChild("SendData") :: AudioPlayer?
+
+        -- Invalida callbacks de transicoes antigas (ex.: o Ended de um boot ja substituido).
+        local token = 0
+
+        -- SendData: toca em loop enquanto ESTE servidor esta 'On' E a barra esta PROGREDINDO (envio
+        -- 'Active' e NAO pausado por falha). Qualquer outra combinacao para o som. Reavaliado a cada
+        -- mudanca de State (do servidor), SendState ou SendFailed.
+        local function refreshSendData()
+            if not sendData then
+                return
+            end
+            local progressing = tabletScreen ~= nil
+                and tabletScreen:GetAttribute("SendState") == "Active"
+                and tabletScreen:GetAttribute("SendFailed") ~= true
+            if model:GetAttribute("State") == "On" and progressing then
+                if not sendData.IsPlaying then
+                    sendData.Looping = true
+                    sendData:Play()
+                end
+            else
+                sendData:Stop()
+            end
+        end
+
+        local function stopAll()
+            if boot then boot:Stop() end
+            if idle then idle:Stop() end
+            if turnOff then turnOff:Stop() end
+            if sendData then sendData:Stop() end
+        end
+
+        ctx.Connections:Connect(ctx.Map, "OfficeServerAudio" .. index, model:GetAttributeChangedSignal("State"), function()
+            token += 1
+            local myToken = token
+            local state = model:GetAttribute("State")
+
+            if state == "Booting" then
+                stopAll()
+                if boot then
+                    boot.Looping = false
+                    boot.Ended:Once(function()
+                        -- So entra no idle se ainda for ESTA transicao e o servidor nao caiu (Off).
+                        local s = model:GetAttribute("State")
+                        if myToken == token and idle and (s == "Booting" or s == "On") then
+                            idle.Looping = true
+                            idle:Play()
+                        end
+                    end)
+                    boot:Play()
+                elseif idle then
+                    idle.Looping = true
+                    idle:Play()
+                end
+            elseif state == "Off" then
+                stopAll()
+                if turnOff then
+                    turnOff.Looping = false
+                    turnOff:Play()
+                end
+            end
+            -- "On": nada de boot/idle (o idle segue tocando); o SendData e reavaliado abaixo.
+            refreshSendData()
+        end)
+
+        -- O SendData tambem liga/desliga quando o envio (SendState) ou a pausa por falha (SendFailed)
+        -- mudam.
+        if tabletScreen then
+            ctx.Connections:Connect(ctx.Map, "OfficeServerSendAudio" .. index, tabletScreen:GetAttributeChangedSignal("SendState"), refreshSendData)
+            ctx.Connections:Connect(ctx.Map, "OfficeServerSendFail" .. index, tabletScreen:GetAttributeChangedSignal("SendFailed"), refreshSendData)
+        end
+    end
+
     local serverModels = {}
     local serversFolder = ctx.Map:FindFirstChild("Servers")
     if serversFolder then
-        for _, model in ipairs(serversFolder:GetChildren()) do
+        for index, model in ipairs(serversFolder:GetChildren()) do
             if model:IsA("Model") then
-                model:SetAttribute("State", "Off")
+                model:SetAttribute("State", "Off") -- estado inicial ANTES de conectar o audio (silencioso)
                 table.insert(serverModels, model)
+                setupServerAudio(model, index)
             end
         end
     end
@@ -250,7 +342,7 @@ function Office.OnLoad(ctx)
     -- reflete): SendState ('Idle'|'Active'|'Done'), SendProgress (0..1), SendFailed (bool, barra
     -- vermelha enquanto pausado por falha de servidor). O progresso avanca em 1 minuto de tempo
     -- RODANDO; se um servidor falha no meio, ele para ate o player rebootar aquele servidor.
-    local tabletScreen = resolve(ctx.Map, "Model", "Tablet", "Screen")
+    -- (tabletScreen ja foi resolvido acima, junto ao setup de audio dos servidores.)
     if tabletScreen then
         tabletScreen:SetAttribute("SendState", "Idle")
         tabletScreen:SetAttribute("SendProgress", 0)
