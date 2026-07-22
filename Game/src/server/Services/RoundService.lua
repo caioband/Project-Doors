@@ -105,6 +105,7 @@ local RoundStateRemote: RemoteEvent
 local StartTransitionRemote: RemoteEvent
 local RoundTimerRemote: RemoteEvent
 local EscapeTransitionRemote: RemoteEvent
+local RoundResultsRemote: RemoteEvent
 
 
 -- Garante a hierarquia ReplicatedStorage.Comms.Round e os Remotes necessarios.
@@ -163,6 +164,15 @@ local function EnsureRemotes()
         EscapeTransitionRemote = Instance.new("RemoteEvent")
         EscapeTransitionRemote.Name = "EscapeTransition"
         EscapeTransitionRemote.Parent = roundFolder
+    end
+
+    -- Envia para cada player, ao voltar para a VotingRoom, as estatisticas da rodada
+    -- (puzzles resolvidos, vezes que caiu, tempo total vivo). Ver FinalizeAndSendResults.
+    RoundResultsRemote = roundFolder:FindFirstChild("RoundResults") :: RemoteEvent
+    if not RoundResultsRemote then
+        RoundResultsRemote = Instance.new("RemoteEvent")
+        RoundResultsRemote.Name = "RoundResults"
+        RoundResultsRemote.Parent = roundFolder
     end
 end
 
@@ -297,6 +307,159 @@ local function UpdateEscapeBillboards(areas: { BasePart }, enabled: boolean, cou
 end
 
 
+-- ==========================================================================================
+-- Estatisticas por rodada (por player): puzzles resolvidos, vezes que caiu (Downed) e tempo
+-- total vivo (soma do tempo com o atributo State == "Alive" durante a rodada, incluindo a fase
+-- de fuga). Puzzles sao contabilizados pelos MapBehaviors do mapa (ex.: Office chama
+-- RoundService:AddPuzzleSolved quando o player resolve um puzzle). Quedas e tempo vivo sao
+-- rastreados aqui automaticamente ouvindo o atributo State de cada personagem (sistema
+-- universal do DownedService), sem depender do mapa. Ao fim da fuga, quando os players voltam
+-- para a VotingRoom, os valores sao finalizados e enviados a cada cliente (RoundResults), que
+-- exibe a ResultsGUI. Definido ANTES de RunEscapePhase (que chama FinalizeAndSendResults).
+-- ==========================================================================================
+
+type PlayerRoundStats = {
+    Puzzles: number,      -- puzzles resolvidos (contabilizados pelos MapBehaviors)
+    Downs: number,        -- quantas vezes entrou em Downed
+    AliveAccum: number,   -- segundos acumulados com State == "Alive"
+    AliveSince: number?,  -- os.clock de quando entrou em "Alive" (nil se nao esta vivo agora)
+}
+
+-- Estatisticas da rodada atual, por player. Vazio fora de uma rodada ativa.
+local RoundStats: { [Player]: PlayerRoundStats } = {}
+-- True enquanto a rodada esta sendo contabilizada (entre StartRoundStats e FinalizeAndSendResults).
+local StatsActive = false
+-- Conexoes vivas da sessao de estatisticas (State de cada personagem + CharacterAdded/PlayerAdded).
+-- Todas desconectadas em FinalizeAndSendResults.
+local StatConnections: { RBXScriptConnection } = {}
+
+
+-- Liga o rastreio de estado (Alive/Downed/Dead) de um personagem para acumular tempo vivo e
+-- contar quedas. Idempotencia por respawn: cada personagem novo comeca fresco (AliveSince nil).
+local function BindStatsCharacter(player: Player, character: Model)
+    local stats = RoundStats[player]
+    if not stats then
+        return
+    end
+
+    local conn = character:GetAttributeChangedSignal("State"):Connect(function()
+        local st = RoundStats[player]
+        if not st then
+            return
+        end
+        local state = character:GetAttribute("State")
+        local now = os.clock()
+        if state == "Alive" then
+            -- Entrou/continua vivo: marca o inicio do trecho vivo se ainda nao estava contando.
+            if st.AliveSince == nil then
+                st.AliveSince = now
+            end
+        else
+            -- Saiu do estado vivo (Downed/Dead): fecha o trecho vivo acumulado.
+            if st.AliveSince ~= nil then
+                st.AliveAccum += now - st.AliveSince
+                st.AliveSince = nil
+            end
+            -- Cada transicao para Downed conta como uma queda.
+            if state == "Downed" then
+                st.Downs += 1
+            end
+        end
+    end)
+    table.insert(StatConnections, conn)
+
+    -- Processa o estado inicial: se ja nasceu vivo, comeca a contar o tempo agora.
+    if character:GetAttribute("State") == "Alive" then
+        stats.AliveSince = os.clock()
+    end
+end
+
+
+-- Cria a entrada de estatisticas de um player e liga o rastreio do personagem atual + respawns.
+local function TrackPlayerStats(player: Player)
+    RoundStats[player] = { Puzzles = 0, Downs = 0, AliveAccum = 0, AliveSince = nil }
+    if player.Character then
+        BindStatsCharacter(player, player.Character)
+    end
+    local conn = player.CharacterAdded:Connect(function(character)
+        BindStatsCharacter(player, character)
+    end)
+    table.insert(StatConnections, conn)
+end
+
+
+-- Inicia a contabilizacao de uma nova rodada: zera tudo e liga o rastreio de todos os players.
+local function StartRoundStats()
+    for _, conn in ipairs(StatConnections) do
+        conn:Disconnect()
+    end
+    StatConnections = {}
+    RoundStats = {}
+    StatsActive = true
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        TrackPlayerStats(player)
+    end
+
+    -- Late-joiners entram na contabilizacao a partir do momento em que chegam.
+    local addConn = Players.PlayerAdded:Connect(function(player)
+        if StatsActive then
+            TrackPlayerStats(player)
+        end
+    end)
+    table.insert(StatConnections, addConn)
+end
+
+
+-- Contabiliza um puzzle resolvido por um player. Chamado pelos MapBehaviors (server) quando o
+-- player resolve um puzzle do mapa. No-op se nao houver rodada sendo contabilizada.
+function RoundService:AddPuzzleSolved(player: Player)
+    local st = RoundStats[player]
+    if st then
+        st.Puzzles += 1
+    end
+end
+
+
+-- Fecha a contabilizacao da rodada (fecha os trechos vivos em aberto), desliga o rastreio e
+-- envia a cada player presente as suas estatisticas (RoundResults). Chamado ao fim da fase de
+-- fuga, quando os players ja foram teleportados de volta para a VotingRoom.
+local function FinalizeAndSendResults()
+    if not StatsActive then
+        return
+    end
+    StatsActive = false
+
+    local now = os.clock()
+    for _, st in pairs(RoundStats) do
+        if st.AliveSince ~= nil then
+            st.AliveAccum += now - st.AliveSince
+            st.AliveSince = nil
+        end
+    end
+
+    for _, conn in ipairs(StatConnections) do
+        conn:Disconnect()
+    end
+    StatConnections = {}
+
+    if RoundResultsRemote then
+        for _, player in ipairs(Players:GetPlayers()) do
+            local st = RoundStats[player]
+            if st then
+                RoundResultsRemote:FireClient(player, {
+                    puzzles = st.Puzzles,
+                    downs = st.Downs,
+                    aliveTime = math.floor(st.AliveAccum),
+                })
+            end
+        end
+    end
+
+    RoundStats = {}
+end
+
+
 -- Conduz a fase de fuga apos o timer da rodada zerar: liga os billboards das areas, conta quantos
 -- players elegiveis (vivos) estao dentro e conduz o countdown (30s ao primeiro entrar; 5s quando
 -- todos os elegiveis estao dentro, inclusive solo). Ao encerrar (deadline ou teto de seguranca),
@@ -386,6 +549,10 @@ local function RunEscapePhase(loadId: number)
             TeleportPlayersToVotingRoom()
         end)
     end
+
+    -- Players ja de volta na VotingRoom: fecha a contabilizacao e envia a cada um as estatisticas
+    -- da rodada (o cliente exibe a ResultsGUI).
+    FinalizeAndSendResults()
 end
 
 
@@ -664,6 +831,10 @@ function RoundService:RunRoundLoop()
         -- Fase de carregamento + rodada ativa.
         self:LoadMap(mapName)
         SetRoundState("Active")
+
+        -- Comeca a contabilizar as estatisticas da rodada (puzzles, quedas, tempo vivo) para
+        -- cada player. Enviadas ao fim da fuga (FinalizeAndSendResults), quando voltam a votacao.
+        StartRoundStats()
 
         -- Conta os 5 minutos da rodada, replicando o tempo restante para os clientes (que
         -- atualizam o Timer da GeneralUis). Bloqueia ate o cronometro chegar a zero.

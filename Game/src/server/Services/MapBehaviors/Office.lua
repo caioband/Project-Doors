@@ -100,6 +100,10 @@ local StartServerBootRemote: RemoteEvent
 -- Cliente clica em "Send Data" (sistema 'On'): inicia o envio de dados (barra de progresso de 1min,
 -- com chance de servidores falharem no meio e precisarem de reboot fisico).
 local StartSendDataRemote: RemoteEvent
+-- Cliente sinaliza que digitou a senha correta no monitor (puzzle resolvido). O server contabiliza
+-- no RoundService (estatisticas da rodada). A validacao da senha e feita no cliente (ele conhece a
+-- senha via SetPassword), entao ele apenas avisa o server.
+local SolvedPasswordRemote: RemoteEvent
 
 
 -- Garante a hierarquia ReplicatedStorage.Comms.Office e os Remotes do puzzle.
@@ -140,6 +144,7 @@ local function EnsureRemotes()
     PlayTabletStartupRemote = ensure("PlayTabletStartup")
     StartServerBootRemote = ensure("StartServerBoot")
     StartSendDataRemote = ensure("StartSendData")
+    SolvedPasswordRemote = ensure("SolvedPassword")
 end
 
 -- Duracao (s) aleatoria [min, max] para cada servidor sair de 'Booting' para 'On'.
@@ -180,6 +185,24 @@ function Office.OnLoad(ctx)
     print(string.format("[Office:server] OnLoad (loadId=%d) - mapa pronto para todos", ctx.LoadId))
 
     EnsureRemotes()
+
+    -- Estatisticas da rodada: o Office contabiliza puzzles resolvidos no RoundService. Sao dois
+    -- eventos que contam como puzzle resolvido: (1) o player digita a senha correta no monitor
+    -- (avisado pelo cliente via SolvedPassword) e (2) o envio de dados do tablet conclui (creditado
+    -- a quem iniciou o Send Data, mais abaixo na logica do envio).
+    local RoundService = ctx.GetService("RoundService")
+
+    -- Cada player so pode ser creditado uma vez pela senha por load (evita contagem duplicada).
+    local passwordSolvedBy: { [Player]: boolean } = {}
+    ctx.Connections:Connect(ctx.Map, "OfficeSolvedPassword", SolvedPasswordRemote.OnServerEvent, function(player: Player)
+        if passwordSolvedBy[player] then
+            return
+        end
+        passwordSolvedBy[player] = true
+        if RoundService and RoundService.AddPuzzleSolved then
+            RoundService:AddPuzzleSolved(player)
+        end
+    end)
 
     -- Secretary: NAO spawna na carga. Fica dormente (escondida) ate o puzzle do monitor falhar.
     -- Quando o cliente termina a animacao de falha, dispara SpawnSecretary e ela e spawnada como
@@ -375,10 +398,13 @@ function Office.OnLoad(ctx)
     end
 
     local sending = false
-    ctx.Connections:Connect(ctx.Map, "OfficeStartSendData", StartSendDataRemote.OnServerEvent, function(_player: Player)
+    -- Player que iniciou o envio de dados (creditado com o puzzle quando o envio concluir).
+    local dataSender: Player? = nil
+    ctx.Connections:Connect(ctx.Map, "OfficeStartSendData", StartSendDataRemote.OnServerEvent, function(player: Player)
         if sending or not tabletScreen then
             return
         end
+        dataSender = player
         -- So envia com TODOS os servidores 'On'.
         for _, model in ipairs(serverModels) do
             if model:GetAttribute("State") ~= "On" then
@@ -450,6 +476,10 @@ function Office.OnLoad(ctx)
                 tabletScreen:SetAttribute("SendProgress", 1)
                 tabletScreen:SetAttribute("SendFailed", false)
                 tabletScreen:SetAttribute("SendState", "Done")
+                -- Envio concluido: conta como um puzzle resolvido para quem iniciou o Send Data.
+                if dataSender and RoundService and RoundService.AddPuzzleSolved then
+                    RoundService:AddPuzzleSolved(dataSender)
+                end
             end
             -- `sending` permanece true: o envio e um evento unico por load.
         end)

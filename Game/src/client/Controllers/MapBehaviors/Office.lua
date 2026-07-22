@@ -679,12 +679,14 @@ function Office.OnLoad(ctx)
     end
 
     -- Senha digitada correta: deixa o texto do TextBox e do Warning verdes. Puzzle resolvido, entao
-    -- o TextBox fica desabilitado de vez (nao ha mais o que digitar).
+    -- o TextBox fica desabilitado de vez (nao ha mais o que digitar). Avisa o server para contabilizar
+    -- o puzzle resolvido nas estatisticas da rodada (RoundService, via SolvedPassword).
     local function onCorrectPassword()
         setTextBoxEnabled(false)
         local green = Color3.fromRGB(0, 255, 0)
         spr.target(textBox, 1, 2.5, { TextColor3 = green })
         spr.target(warning, 1, 2.5, { TextColor3 = green })
+        fireOfficeServer("SolvedPassword")
     end
 
     -- Fala a senha digito a digito SO neste cliente (sons locais, nao replicados), com intervalo.
