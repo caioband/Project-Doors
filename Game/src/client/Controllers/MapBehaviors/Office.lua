@@ -30,6 +30,10 @@ local DIGIT_INTERVAL = 1
 local THUNDER_MIN_INTERVAL = 8
 local THUNDER_MAX_INTERVAL = 25
 
+-- Tempo (s) que esperamos os objetos do ManagerPC replicarem antes de desistir do bind do puzzle
+-- do monitor (o OnLoad roda ANTES do mapa terminar de carregar para o cliente).
+local MANAGER_PC_WAIT = 30
+
 -- Resolve um caminho aninhado a partir de uma instancia raiz (nil se algum no faltar).
 local function resolve(root: Instance?, ...: string): Instance?
     local current = root
@@ -38,6 +42,21 @@ local function resolve(root: Instance?, ...: string): Instance?
             return nil
         end
         current = current:FindFirstChild(name)
+    end
+    return current
+end
+
+-- Como resolve(), mas ESPERA cada no aparecer (WaitForChild com timeout). Usado quando o OnLoad roda
+-- antes do mapa terminar de replicar: em vez de faltar instancia e abortar o bind, aguardamos o
+-- objeto carregar. YIELDA, entao so pode ser chamado fora do fluxo do OnLoad (ex.: em task.spawn).
+-- Retorna nil se algum no nao aparecer dentro do timeout.
+local function waitResolve(root: Instance?, timeout: number, ...: string): Instance?
+    local current = root
+    for _, name in { ... } do
+        if not current then
+            return nil
+        end
+        current = current:WaitForChild(name, timeout)
     end
     return current
 end
@@ -404,446 +423,451 @@ function Office.OnLoad(ctx)
         end
     end
 
-    local managerPC = resolve(ctx.Map, "Model", "ManagerPC")
-    if not managerPC then
-        warn("[Office:client] ManagerPC nao encontrado no mapa")
-        return
-    end
+    -- ManagerPC (puzzle do monitor): o OnLoad roda ANTES do mapa terminar de replicar para o cliente,
+    -- entao os objetos do ManagerPC podem ainda nao existir. Em vez de abortar, esperamos (WaitForChild)
+    -- o ManagerPC e seus filhos aparecerem - ou seja, o mapa ja carregado com o player dentro - numa
+    -- thread propria (nao pode bloquear o OnLoad/MapReady) e so entao fazemos o bind.
+    task.spawn(function()
+        local managerPC = waitResolve(ctx.Map, MANAGER_PC_WAIT, "Model", "ManagerPC")
+        local prompt = waitResolve(managerPC, MANAGER_PC_WAIT, "Keyboard", "Union", "ProximityPrompt") :: ProximityPrompt?
+        local cameraPart = waitResolve(managerPC, MANAGER_PC_WAIT, "Cameras", "1") :: BasePart?
+        local surfaceGui = waitResolve(managerPC, MANAGER_PC_WAIT, "SmallMonitor", "Part", "SurfaceGui") :: SurfaceGui?
+        local container = surfaceGui and surfaceGui:WaitForChild("Container", MANAGER_PC_WAIT) :: Frame?
+        local textBox = container and container:WaitForChild("TextBox", MANAGER_PC_WAIT) :: TextBox?
+        local warning = container and container:WaitForChild("Warning", MANAGER_PC_WAIT) :: TextLabel?
+        local runText = container and container:WaitForChild("RunText", MANAGER_PC_WAIT) :: TextLabel?
+        -- SpotLight do monitor (opcional): desligado quando o jogador falha.
+        local spotLight = resolve(managerPC, "SmallMonitor", "Part", "SpotLight") :: SpotLight?
 
-    local prompt = resolve(managerPC, "Keyboard", "Union", "ProximityPrompt") :: ProximityPrompt?
-    local cameraPart = resolve(managerPC, "Cameras", "1") :: BasePart?
-    local surfaceGui = resolve(managerPC, "SmallMonitor", "Part", "SurfaceGui") :: SurfaceGui?
-    local container = surfaceGui and surfaceGui:FindFirstChild("Container") :: Frame?
-    local textBox = container and container:FindFirstChild("TextBox") :: TextBox?
-    local warning = container and container:FindFirstChild("Warning") :: TextLabel?
-    local runText = container and container:FindFirstChild("RunText") :: TextLabel?
-    -- SpotLight do monitor (opcional): desligado quando o jogador falha.
-    local spotLight = resolve(managerPC, "SmallMonitor", "Part", "SpotLight") :: SpotLight?
-
-    if not (prompt and cameraPart and surfaceGui and container and textBox and warning and runText) then
-        warn("[Office:client] Instancias do ManagerPC faltando; abortando bind")
-        return
-    end
-
-    -- Senha do monitor: gerada e enviada pelo server (SetPassword) quando o puzzle inicia.
-    -- Fica nil ate chegar; sem ela nao validamos o que e digitado.
-    local password: string? = nil
-
-    -- Guarda os valores de repouso para a tremida sempre voltar ao estado original.
-    local textBoxBasePos = textBox.Position
-    local textBoxBaseColor = textBox.TextColor3
-    local warningBasePos = warning.Position
-    local warningBaseRot = warning.Rotation
-    local warningBaseColor = warning.TextColor3
-
-    -- Tremida ao errar a senha: o TextBox treme so na posicao; o Warning (TextLabel) treme na
-    -- posicao e rotacao, e ainda pisca vermelho voltando para a cor original. As nudges iniciais
-    -- sao corrigidas por springs subamortecidos (damping baixo), gerando o balanco da tremida.
-    local function shakeOnWrongPassword()
-        -- TextBox: apenas posicao.
-        textBox.Position = textBoxBasePos + UDim2.fromScale(0.05, 0)
-        textBox.TextColor3 = Color3.fromRGB(255, 0, 0)
-        spr.target(textBox, 0.25, 7, { Position = textBoxBasePos })
-        spr.target(textBox, 1, 2.5, { TextColor3 = textBoxBaseColor })
-
-        -- Warning: posicao + rotacao, e flash vermelho de volta a cor original.
-        warning.Position = warningBasePos + UDim2.fromScale(0.04, 0)
-        warning.Rotation = warningBaseRot + 10
-        warning.TextColor3 = Color3.fromRGB(255, 0, 0)
-        spr.target(warning, 0.25, 7, {
-            Position = warningBasePos,
-            Rotation = warningBaseRot,
-        })
-        spr.target(warning, 1, 2.5, { TextColor3 = warningBaseColor })
-    end
-
-    -- Cor de repouso do Container, usada para escurece-lo ate o preto conforme os erros.
-    local containerBaseColor = container.BackgroundColor3
-
-    -- Estado do monitor, compartilhado entre o prompt, o botao Back e a checagem de senha.
-    local activated = false      -- monitor aberto (camera presa nele)
-    local introPlayed = false    -- animacoes de entrada ja tocaram (so na primeira visita)
-    local errorCount = 0         -- quantidade de senhas erradas acumuladas
-    local failed = false         -- jogador esgotou as tentativas
-    local unlocked = false       -- jogador acertou a senha
-
-    -- Bloqueio de digitacao enquanto qualquer animacao/efeito do monitor estiver rodando. E um
-    -- contador (beginBusy/endBusy se aninham): o TextBox so volta a aceitar texto quando o contador
-    -- zera e o puzzle nao foi resolvido/falhado. Comeca desabilitado ate a intro liberar.
-    local busyCount = 0
-    local function setTextBoxEnabled(enabled: boolean)
-        textBox.TextEditable = enabled
-        textBox.Selectable = enabled
-        if not enabled then
-            textBox:ReleaseFocus()
-        end
-    end
-    local function beginBusy()
-        busyCount += 1
-        if busyCount == 1 then
-            setTextBoxEnabled(false)
-        end
-    end
-    local function endBusy()
-        busyCount = math.max(0, busyCount - 1)
-        if busyCount == 0 and not failed and not unlocked then
-            setTextBoxEnabled(true)
-        end
-    end
-    setTextBoxEnabled(false)
-
-    -- Botao "Back" da GeneralUis: aparece ao abrir o monitor e, ao ser clicado, devolve o
-    -- jogador ao estado anterior (camera/mouse/viewmodel). Comeca escondido.
-    local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
-    local backButton = resolve(playerGui, "SharedGuis", "GeneralUis", "Frame", "Back") :: ImageButton?
-    if backButton then
-        backButton.Visible = false
-    end
-
-    -- Remove os labels de caractere gerados pelo efeito de texto do twinkle no Container.
-    local function clearCharLabels()
-        for _, child in container:GetChildren() do
-            if child:GetAttribute("CharLabel") then
-                child:Destroy()
-            end
-        end
-    end
-
-    -- Anima um texto no Warning com o efeito "Glitch" (mesmo padrao da intro): esconde o label,
-    -- toca o efeito e, ao terminar, limpa os char labels e restaura o Warning ja com o texto final.
-    local function showWarningGlitch(text: string, onComplete: (() -> ())?)
-        UIAnimator.ShowText(container, warning, text, {
-            effect = "Glitch",
-            onComplete = function()
-                clearCharLabels()
-                warning.Text = text
-                warning.Visible = true
-                if onComplete then
-                    onComplete()
-                end
-            end,
-        })
-    end
-
-    -- Sai do monitor e restaura o estado anterior ao acionamento do prompt: devolve a camera ao
-    -- jogador (Custom), retrava o mouse em primeira pessoa e retoma o viewmodel. O :Resume
-    -- reexibe automaticamente o modelo do item SE havia algum equipado quando o monitor abriu
-    -- (o viewmodel foi apenas pausado/escondido, nao destruido).
-    local function exitMonitor()
-        if not activated then
+        -- Mapa descarregado enquanto esperavamos: nao faz sentido bindar.
+        if not ctx.Map.Parent then
             return
         end
-        activated = false
+        if not (prompt and cameraPart and surfaceGui and container and textBox and warning and runText) then
+            warn("[Office:client] Instancias do ManagerPC faltando mesmo apos esperar; bind cancelado")
+            return
+        end
 
+        -- Senha do monitor: gerada e enviada pelo server (SetPassword) quando o puzzle inicia.
+        -- Fica nil ate chegar; sem ela nao validamos o que e digitado.
+        local password: string? = nil
+
+        -- Guarda os valores de repouso para a tremida sempre voltar ao estado original.
+        local textBoxBasePos = textBox.Position
+        local textBoxBaseColor = textBox.TextColor3
+        local warningBasePos = warning.Position
+        local warningBaseRot = warning.Rotation
+        local warningBaseColor = warning.TextColor3
+
+        -- Tremida ao errar a senha: o TextBox treme so na posicao; o Warning (TextLabel) treme na
+        -- posicao e rotacao, e ainda pisca vermelho voltando para a cor original. As nudges iniciais
+        -- sao corrigidas por springs subamortecidos (damping baixo), gerando o balanco da tremida.
+        local function shakeOnWrongPassword()
+            -- TextBox: apenas posicao.
+            textBox.Position = textBoxBasePos + UDim2.fromScale(0.05, 0)
+            textBox.TextColor3 = Color3.fromRGB(255, 0, 0)
+            spr.target(textBox, 0.25, 7, { Position = textBoxBasePos })
+            spr.target(textBox, 1, 2.5, { TextColor3 = textBoxBaseColor })
+
+            -- Warning: posicao + rotacao, e flash vermelho de volta a cor original.
+            warning.Position = warningBasePos + UDim2.fromScale(0.04, 0)
+            warning.Rotation = warningBaseRot + 10
+            warning.TextColor3 = Color3.fromRGB(255, 0, 0)
+            spr.target(warning, 0.25, 7, {
+                Position = warningBasePos,
+                Rotation = warningBaseRot,
+            })
+            spr.target(warning, 1, 2.5, { TextColor3 = warningBaseColor })
+        end
+
+        -- Cor de repouso do Container, usada para escurece-lo ate o preto conforme os erros.
+        local containerBaseColor = container.BackgroundColor3
+
+        -- Estado do monitor, compartilhado entre o prompt, o botao Back e a checagem de senha.
+        local activated = false      -- monitor aberto (camera presa nele)
+        local introPlayed = false    -- animacoes de entrada ja tocaram (so na primeira visita)
+        local errorCount = 0         -- quantidade de senhas erradas acumuladas
+        local failed = false         -- jogador esgotou as tentativas
+        local unlocked = false       -- jogador acertou a senha
+
+        -- Bloqueio de digitacao enquanto qualquer animacao/efeito do monitor estiver rodando. E um
+        -- contador (beginBusy/endBusy se aninham): o TextBox so volta a aceitar texto quando o contador
+        -- zera e o puzzle nao foi resolvido/falhado. Comeca desabilitado ate a intro liberar.
+        local busyCount = 0
+        local function setTextBoxEnabled(enabled: boolean)
+            textBox.TextEditable = enabled
+            textBox.Selectable = enabled
+            if not enabled then
+                textBox:ReleaseFocus()
+            end
+        end
+        local function beginBusy()
+            busyCount += 1
+            if busyCount == 1 then
+                setTextBoxEnabled(false)
+            end
+        end
+        local function endBusy()
+            busyCount = math.max(0, busyCount - 1)
+            if busyCount == 0 and not failed and not unlocked then
+                setTextBoxEnabled(true)
+            end
+        end
+        setTextBoxEnabled(false)
+
+        -- Botao "Back" da GeneralUis: aparece ao abrir o monitor e, ao ser clicado, devolve o
+        -- jogador ao estado anterior (camera/mouse/viewmodel). Comeca escondido.
+        local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
+        local backButton = resolve(playerGui, "SharedGuis", "GeneralUis", "Frame", "Back") :: ImageButton?
         if backButton then
             backButton.Visible = false
         end
 
-        -- Devolve a camera ao jogador (Custom) ANTES de retomar o viewmodel.
-        local camera = workspace.CurrentCamera
-        camera.CameraType = Enum.CameraType.Custom
-
-        -- Retrava o mouse em primeira pessoa (cursor escondido, travado no centro).
-        UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
-        UserInputService.MouseIconEnabled = false
-
-        local viewmodel = ctx.GetController("ViewmodelController"):GetViewmodel()
-        if viewmodel then
-            viewmodel:Resume()
+        -- Remove os labels de caractere gerados pelo efeito de texto do twinkle no Container.
+        local function clearCharLabels()
+            for _, child in container:GetChildren() do
+                if child:GetAttribute("CharLabel") then
+                    child:Destroy()
+                end
+            end
         end
-    end
 
-    if backButton then
-        ctx.Connections:Connect(ctx.Map, "OfficeBackButton", backButton.Activated, exitMonitor)
-    end
+        -- Anima um texto no Warning com o efeito "Glitch" (mesmo padrao da intro): esconde o label,
+        -- toca o efeito e, ao terminar, limpa os char labels e restaura o Warning ja com o texto final.
+        local function showWarningGlitch(text: string, onComplete: (() -> ())?)
+            UIAnimator.ShowText(container, warning, text, {
+                effect = "Glitch",
+                onComplete = function()
+                    clearCharLabels()
+                    warning.Text = text
+                    warning.Visible = true
+                    if onComplete then
+                        onComplete()
+                    end
+                end,
+            })
+        end
 
-    -- Sequencia de falha (tentativas esgotadas): toca "YOU FAILED" e depois "RUN" com efeito
-    -- Glitch no RunText, apaga o texto, desliga o monitor (SurfaceGui + SpotLight) e restaura a
-    -- camera/mouse/viewmodel (igual ao botao Back). Roda em sua propria thread (yielda).
-    local function playFailure()
-        UIAnimator.ShowText(container, runText, "YOU FAILED", {
-            effect = "Glitch",
-            onComplete = function()
-                clearCharLabels()
-                runText.Text = "YOU FAILED"
-                runText.Visible = true
+        -- Sai do monitor e restaura o estado anterior ao acionamento do prompt: devolve a camera ao
+        -- jogador (Custom), retrava o mouse em primeira pessoa e retoma o viewmodel. O :Resume
+        -- reexibe automaticamente o modelo do item SE havia algum equipado quando o monitor abriu
+        -- (o viewmodel foi apenas pausado/escondido, nao destruido).
+        local function exitMonitor()
+            if not activated then
+                return
+            end
+            activated = false
 
+            if backButton then
+                backButton.Visible = false
+            end
+
+            -- Devolve a camera ao jogador (Custom) ANTES de retomar o viewmodel.
+            local camera = workspace.CurrentCamera
+            camera.CameraType = Enum.CameraType.Custom
+
+            -- Retrava o mouse em primeira pessoa (cursor escondido, travado no centro).
+            UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+            UserInputService.MouseIconEnabled = false
+
+            local viewmodel = ctx.GetController("ViewmodelController"):GetViewmodel()
+            if viewmodel then
+                viewmodel:Resume()
+            end
+        end
+
+        if backButton then
+            ctx.Connections:Connect(ctx.Map, "OfficeBackButton", backButton.Activated, exitMonitor)
+        end
+
+        -- Sequencia de falha (tentativas esgotadas): toca "YOU FAILED" e depois "RUN" com efeito
+        -- Glitch no RunText, apaga o texto, desliga o monitor (SurfaceGui + SpotLight) e restaura a
+        -- camera/mouse/viewmodel (igual ao botao Back). Roda em sua propria thread (yielda).
+        local function playFailure()
+            UIAnimator.ShowText(container, runText, "YOU FAILED", {
+                effect = "Glitch",
+                onComplete = function()
+                    clearCharLabels()
+                    runText.Text = "YOU FAILED"
+                    runText.Visible = true
+
+                    task.wait(2)
+
+                    UIAnimator.ShowText(container, runText, "RUN", {
+                        effect = "Glitch",
+                        onComplete = function()
+                            clearCharLabels()
+                            runText.Text = "RUN"
+                            runText.Visible = true
+
+                            task.wait(1)
+
+                            -- Apaga o texto e desliga o monitor.
+                            runText.Text = ""
+                            runText.Visible = false
+                            surfaceGui.Enabled = false
+                            if spotLight then
+                                spotLight.Enabled = false
+                            end
+
+                            -- Restaura camera/mouse/viewmodel (igual ao botao Back).
+                            exitMonitor()
+
+                            -- Depois da animacao de falha: pede ao server para tocar varios telefones
+                            -- aleatorios (so o som de Ring) por ~30s.
+                            fireOfficeServer("StartFailureRing")
+
+                            -- E spawna a Secretary cacadora, que passa a correr atras do player.
+                            fireOfficeServer("SpawnSecretary")
+                        end,
+                    })
+                end,
+            })
+        end
+
+        -- Avanca o progresso de erro do puzzle (n/total): deixa o TextBox/Warning mais transparentes
+        -- e o Container mais preto; ao esgotar as tentativas (transparencia 1 / container preto)
+        -- dispara a sequencia de falha. Usado tanto pela senha errada quanto pelo timeout do telefone.
+        -- Se ainda houver tentativas: roda `onRetry` (se passado) para o feedback do erro, ou apenas
+        -- recomeça o loop dos telefones (timeout).
+        local function addPuzzleError(onRetry: (() -> ())?)
+            if failed then
+                return
+            end
+
+            errorCount += 1
+            local ratio = math.clamp(errorCount / MAX_PASSWORD_ERRORS, 0, 1)
+            spr.target(textBox, 1, 2.5, { TextTransparency = ratio, BackgroundTransparency = ratio })
+            spr.target(warning, 1, 2.5, { TextTransparency = ratio })
+            spr.target(container, 1, 2.5, {
+                BackgroundColor3 = containerBaseColor:Lerp(Color3.new(0, 0, 0), ratio),
+            })
+
+            if errorCount >= MAX_PASSWORD_ERRORS then
+                failed = true
+                -- Falhou: para os telefones que estiverem tocando, espera e roda a animacao de falha
+                -- (que ao final pede o toque de varios telefones).
+                fireOfficeServer("StopPhones")
                 task.wait(2)
-
-                UIAnimator.ShowText(container, runText, "RUN", {
-                    effect = "Glitch",
-                    onComplete = function()
-                        clearCharLabels()
-                        runText.Text = "RUN"
-                        runText.Visible = true
-
-                        task.wait(1)
-
-                        -- Apaga o texto e desliga o monitor.
-                        runText.Text = ""
-                        runText.Visible = false
-                        surfaceGui.Enabled = false
-                        if spotLight then
-                            spotLight.Enabled = false
-                        end
-
-                        -- Restaura camera/mouse/viewmodel (igual ao botao Back).
-                        exitMonitor()
-
-                        -- Depois da animacao de falha: pede ao server para tocar varios telefones
-                        -- aleatorios (so o som de Ring) por ~30s.
-                        fireOfficeServer("StartFailureRing")
-
-                        -- E spawna a Secretary cacadora, que passa a correr atras do player.
-                        fireOfficeServer("SpawnSecretary")
-                    end,
-                })
-            end,
-        })
-    end
-
-    -- Avanca o progresso de erro do puzzle (n/total): deixa o TextBox/Warning mais transparentes
-    -- e o Container mais preto; ao esgotar as tentativas (transparencia 1 / container preto)
-    -- dispara a sequencia de falha. Usado tanto pela senha errada quanto pelo timeout do telefone.
-    -- Se ainda houver tentativas: roda `onRetry` (se passado) para o feedback do erro, ou apenas
-    -- recomeça o loop dos telefones (timeout).
-    local function addPuzzleError(onRetry: (() -> ())?)
-        if failed then
-            return
+                task.spawn(playFailure)
+            elseif onRetry then
+                -- Errou mas ainda tem tentativas: roda o feedback do erro (que ao final recomeça o loop).
+                task.spawn(onRetry)
+            else
+                -- Errou mas ainda tem tentativas (timeout): recomeça o loop (o server sorteia novos telefones).
+                fireOfficeServer("RestartPhonePuzzle")
+            end
         end
 
-        errorCount += 1
-        local ratio = math.clamp(errorCount / MAX_PASSWORD_ERRORS, 0, 1)
-        spr.target(textBox, 1, 2.5, { TextTransparency = ratio, BackgroundTransparency = ratio })
-        spr.target(warning, 1, 2.5, { TextTransparency = ratio })
-        spr.target(container, 1, 2.5, {
-            BackgroundColor3 = containerBaseColor:Lerp(Color3.new(0, 0, 0), ratio),
-        })
-
-        if errorCount >= MAX_PASSWORD_ERRORS then
-            failed = true
-            -- Falhou: para os telefones que estiverem tocando, espera e roda a animacao de falha
-            -- (que ao final pede o toque de varios telefones).
+        -- Feedback ao errar a senha mas ainda ter tentativas: para imediatamente o telefone que esta
+        -- tocando, espera a tremida (animacao de erro) assentar e entao anima no Warning, com efeito
+        -- Glitch, "Incorrect password", depois (1s) "You have N more attempts" (N = tentativas
+        -- restantes) e por fim o texto original "Pick the next call"; ao terminar, recomeça o loop dos
+        -- telefones no server. Yielda (roda em sua propria thread via task.spawn no addPuzzleError).
+        local function playRetryFeedback()
             fireOfficeServer("StopPhones")
-            task.wait(2)
-            task.spawn(playFailure)
-        elseif onRetry then
-            -- Errou mas ainda tem tentativas: roda o feedback do erro (que ao final recomeça o loop).
-            task.spawn(onRetry)
-        else
-            -- Errou mas ainda tem tentativas (timeout): recomeça o loop (o server sorteia novos telefones).
-            fireOfficeServer("RestartPhonePuzzle")
-        end
-    end
 
-    -- Feedback ao errar a senha mas ainda ter tentativas: para imediatamente o telefone que esta
-    -- tocando, espera a tremida (animacao de erro) assentar e entao anima no Warning, com efeito
-    -- Glitch, "Incorrect password", depois (1s) "You have N more attempts" (N = tentativas
-    -- restantes) e por fim o texto original "Pick the next call"; ao terminar, recomeça o loop dos
-    -- telefones no server. Yielda (roda em sua propria thread via task.spawn no addPuzzleError).
-    local function playRetryFeedback()
-        fireOfficeServer("StopPhones")
+            local remaining = MAX_PASSWORD_ERRORS - errorCount
+            local attemptsText = string.format(
+                "You have %d more attempt%s",
+                remaining,
+                if remaining == 1 then "" else "s"
+            )
 
-        local remaining = MAX_PASSWORD_ERRORS - errorCount
-        local attemptsText = string.format(
-            "You have %d more attempt%s",
-            remaining,
-            if remaining == 1 then "" else "s"
-        )
-
-        -- Espera a animacao de erro (tremida) assentar antes de reescrever o Warning.
-        task.wait(1)
-        showWarningGlitch("Incorrect password", function()
+            -- Espera a animacao de erro (tremida) assentar antes de reescrever o Warning.
             task.wait(1)
-            showWarningGlitch(attemptsText, function()
+            showWarningGlitch("Incorrect password", function()
                 task.wait(1)
-                showWarningGlitch("Pick the next call", function()
-                    fireOfficeServer("RestartPhonePuzzle")
-                    -- Fim da sequencia de feedback: libera o TextBox para a proxima tentativa.
-                    endBusy()
+                showWarningGlitch(attemptsText, function()
+                    task.wait(1)
+                    showWarningGlitch("Pick the next call", function()
+                        fireOfficeServer("RestartPhonePuzzle")
+                        -- Fim da sequencia de feedback: libera o TextBox para a proxima tentativa.
+                        endBusy()
+                    end)
                 end)
             end)
-        end)
-    end
-
-    -- Senha digitada errada: treme e contabiliza um erro do puzzle (com feedback de retentativa).
-    -- Marca o monitor como ocupado durante toda a sequencia (tremida + glitches), bloqueando a
-    -- digitacao; o endBusy correspondente roda no fim de playRetryFeedback.
-    local function onWrongPassword()
-        if failed then
-            return
-        end
-        beginBusy()
-        shakeOnWrongPassword()
-        addPuzzleError(playRetryFeedback)
-    end
-
-    -- Senha digitada correta: deixa o texto do TextBox e do Warning verdes. Puzzle resolvido, entao
-    -- o TextBox fica desabilitado de vez (nao ha mais o que digitar). Avisa o server para contabilizar
-    -- o puzzle resolvido nas estatisticas da rodada (RoundService, via SolvedPassword).
-    local function onCorrectPassword()
-        setTextBoxEnabled(false)
-        local green = Color3.fromRGB(0, 255, 0)
-        spr.target(textBox, 1, 2.5, { TextColor3 = green })
-        spr.target(warning, 1, 2.5, { TextColor3 = green })
-        fireOfficeServer("SolvedPassword")
-    end
-
-    -- Fala a senha digito a digito SO neste cliente (sons locais, nao replicados), com intervalo.
-    -- Os Sounds ficam em ctx.Map.Sounds.OfficePuzzleVoice. Yielda (task.wait entre digitos).
-    local function playPasswordVoiceLocal(pwd: string)
-        local soundsFolder = ctx.Map:FindFirstChild("Sounds")
-        local voiceGroup = soundsFolder and soundsFolder:FindFirstChild("OfficePuzzleVoice")
-        if not voiceGroup then
-            return
         end
 
-        -- Label que mostra os digitos conforme sao falados, concatenando "1-2-3-4".
-        local bottomText = resolve(playerGui, "SharedGuis", "GeneralUis", "Frame", "BottomText") :: TextLabel?
-        if bottomText then
-            bottomText.Text = ""
-            bottomText.Visible = true
-        end
-
-        local shown = ""
-        for i = 1, #pwd do
-            -- Espera ANTES de cada digito (inclusive um lead-in antes do primeiro). Isso evita
-            -- que o primeiro digito toque no mesmo frame do atendimento/som de Pick (onde ele era
-            -- abafado/descartado, parecendo nao tocar); os demais ja tocavam em frames calmos.
-            task.wait(DIGIT_INTERVAL)
-            local digit = pwd:sub(i, i)
-            local sound = voiceGroup:FindFirstChild(digit)
-            if sound and sound:IsA("Sound") then
-                sound:Play()
+        -- Senha digitada errada: treme e contabiliza um erro do puzzle (com feedback de retentativa).
+        -- Marca o monitor como ocupado durante toda a sequencia (tremida + glitches), bloqueando a
+        -- digitacao; o endBusy correspondente roda no fim de playRetryFeedback.
+        local function onWrongPassword()
+            if failed then
+                return
             end
+            beginBusy()
+            shakeOnWrongPassword()
+            addPuzzleError(playRetryFeedback)
+        end
+
+        -- Senha digitada correta: deixa o texto do TextBox e do Warning verdes. Puzzle resolvido, entao
+        -- o TextBox fica desabilitado de vez (nao ha mais o que digitar). Avisa o server para contabilizar
+        -- o puzzle resolvido nas estatisticas da rodada (RoundService, via SolvedPassword).
+        local function onCorrectPassword()
+            setTextBoxEnabled(false)
+            local green = Color3.fromRGB(0, 255, 0)
+            spr.target(textBox, 1, 2.5, { TextColor3 = green })
+            spr.target(warning, 1, 2.5, { TextColor3 = green })
+            fireOfficeServer("SolvedPassword")
+        end
+
+        -- Fala a senha digito a digito SO neste cliente (sons locais, nao replicados), com intervalo.
+        -- Os Sounds ficam em ctx.Map.Sounds.OfficePuzzleVoice. Yielda (task.wait entre digitos).
+        local function playPasswordVoiceLocal(pwd: string)
+            local soundsFolder = ctx.Map:FindFirstChild("Sounds")
+            local voiceGroup = soundsFolder and soundsFolder:FindFirstChild("OfficePuzzleVoice")
+            if not voiceGroup then
+                return
+            end
+
+            -- Label que mostra os digitos conforme sao falados, concatenando "1-2-3-4".
+            local bottomText = resolve(playerGui, "SharedGuis", "GeneralUis", "Frame", "BottomText") :: TextLabel?
             if bottomText then
-                shown = if shown == "" then digit else shown .. "-" .. digit
-                bottomText.Text = shown
+                bottomText.Text = ""
+                bottomText.Visible = true
+            end
+
+            local shown = ""
+            for i = 1, #pwd do
+                -- Espera ANTES de cada digito (inclusive um lead-in antes do primeiro). Isso evita
+                -- que o primeiro digito toque no mesmo frame do atendimento/som de Pick (onde ele era
+                -- abafado/descartado, parecendo nao tocar); os demais ja tocavam em frames calmos.
+                task.wait(DIGIT_INTERVAL)
+                local digit = pwd:sub(i, i)
+                local sound = voiceGroup:FindFirstChild(digit)
+                if sound and sound:IsA("Sound") then
+                    sound:Play()
+                end
+                if bottomText then
+                    shown = if shown == "" then digit else shown .. "-" .. digit
+                    bottomText.Text = shown
+                end
+            end
+
+            -- Mantem "1-2-3-4" completo enquanto o ultimo digito termina de tocar e entao esconde.
+            task.wait(DIGIT_INTERVAL)
+            if bottomText then
+                bottomText.Visible = false
+                bottomText.Text = ""
             end
         end
 
-        -- Mantem "1-2-3-4" completo enquanto o ultimo digito termina de tocar e entao esconde.
-        task.wait(DIGIT_INTERVAL)
-        if bottomText then
-            bottomText.Visible = false
-            bottomText.Text = ""
-        end
-    end
-
-    -- Avisa o server para iniciar o puzzle dos telefones (chamado quando a animacao do monitor
-    -- termina).
-    local function startPhonePuzzleOnServer()
-        fireOfficeServer("StartPhonePuzzle")
-    end
-
-    -- Conecta os remotes server->client do puzzle (SetPassword/PlayPickSound/AddPuzzleError) de
-    -- forma assincrona: o server so os cria apos a barreira de prontidao, entao nao da para
-    -- esperar por eles aqui no OnLoad sem travar o MapReady.
-    task.spawn(function()
-        local comms = ReplicatedStorage:WaitForChild("Comms", 30)
-        local office = comms and comms:WaitForChild("Office", 30)
-        if not office or not ctx.Map.Parent then
-            return
-        end
-        local setPassword = office:WaitForChild("SetPassword", 30)
-        local playPick = office:WaitForChild("PlayPickSound", 30)
-        local playVoice = office:WaitForChild("PlayPasswordVoice", 30)
-        local addError = office:WaitForChild("AddPuzzleError", 30)
-        if not (setPassword and playPick and playVoice and addError) or not ctx.Map.Parent then
-            return
+        -- Avisa o server para iniciar o puzzle dos telefones (chamado quando a animacao do monitor
+        -- termina).
+        local function startPhonePuzzleOnServer()
+            fireOfficeServer("StartPhonePuzzle")
         end
 
-        -- Server enviou a senha desta rodada (para validar o que for digitado no monitor).
-        ctx.Connections:Connect(ctx.Map, "OfficeSetPassword", setPassword.OnClientEvent, function(pwd)
-            if typeof(pwd) == "string" then
-                password = pwd
+        -- Conecta os remotes server->client do puzzle (SetPassword/PlayPickSound/AddPuzzleError) de
+        -- forma assincrona: o server so os cria apos a barreira de prontidao, entao nao da para
+        -- esperar por eles aqui no OnLoad sem travar o MapReady.
+        task.spawn(function()
+            local comms = ReplicatedStorage:WaitForChild("Comms", 30)
+            local office = comms and comms:WaitForChild("Office", 30)
+            if not office or not ctx.Map.Parent then
+                return
+            end
+            local setPassword = office:WaitForChild("SetPassword", 30)
+            local playPick = office:WaitForChild("PlayPickSound", 30)
+            local playVoice = office:WaitForChild("PlayPasswordVoice", 30)
+            local addError = office:WaitForChild("AddPuzzleError", 30)
+            if not (setPassword and playPick and playVoice and addError) or not ctx.Map.Parent then
+                return
+            end
+
+            -- Server enviou a senha desta rodada (para validar o que for digitado no monitor).
+            ctx.Connections:Connect(ctx.Map, "OfficeSetPassword", setPassword.OnClientEvent, function(pwd)
+                if typeof(pwd) == "string" then
+                    password = pwd
+                end
+            end)
+
+            -- Server mandou tocar o som de Pick (atender o telefone) SO neste cliente (nao replicado).
+            ctx.Connections:Connect(ctx.Map, "OfficePlayPick", playPick.OnClientEvent, function(pickSound)
+                if pickSound and pickSound:IsA("Sound") then
+                    pickSound:Play()
+                end
+            end)
+
+            -- Atendeu o telefone correto: fala a senha digito a digito SO neste cliente (atendente).
+            ctx.Connections:Connect(ctx.Map, "OfficePlayVoice", playVoice.OnClientEvent, function(pwd)
+                if typeof(pwd) == "string" then
+                    task.spawn(playPasswordVoiceLocal, pwd)
+                end
+            end)
+
+            -- Server contabilizou um erro do puzzle (ex.: timeout do telefone): aplica no monitor.
+            ctx.Connections:Connect(ctx.Map, "OfficeAddError", addError.OnClientEvent, function()
+                addPuzzleError()
+            end)
+        end)
+
+        -- Checa a senha digitada quando o player confirma (Enter): acerto deixa o texto verde,
+        -- erro treme e conta +1 erro. Ignora apos acertar (unlocked) ou apos falhar.
+        ctx.Connections:Connect(ctx.Map, "OfficePasswordCheck", textBox.FocusLost, function(enterPressed)
+            if not enterPressed or failed or unlocked or not password then
+                return
+            end
+            if textBox.Text == password then
+                unlocked = true
+                onCorrectPassword()
+            else
+                onWrongPassword()
             end
         end)
 
-        -- Server mandou tocar o som de Pick (atender o telefone) SO neste cliente (nao replicado).
-        ctx.Connections:Connect(ctx.Map, "OfficePlayPick", playPick.OnClientEvent, function(pickSound)
-            if pickSound and pickSound:IsA("Sound") then
-                pickSound:Play()
+        ctx.Connections:Connect(ctx.Map, "OfficeManagerPC", prompt.Triggered, function()
+            if activated or failed then
+                return
             end
-        end)
+            activated = true
 
-        -- Atendeu o telefone correto: fala a senha digito a digito SO neste cliente (atendente).
-        ctx.Connections:Connect(ctx.Map, "OfficePlayVoice", playVoice.OnClientEvent, function(pwd)
-            if typeof(pwd) == "string" then
-                task.spawn(playPasswordVoiceLocal, pwd)
+            -- Pausa o viewmodel: para o loop de render (liberando a camera) e ESCONDE o modelo do
+            -- item, se houver, sem destrui-lo - assim o :Resume no exitMonitor consegue restaura-lo.
+            local viewmodel = ctx.GetController("ViewmodelController"):GetViewmodel()
+            if viewmodel then
+                viewmodel:Pause()
             end
-        end)
 
-        -- Server contabilizou um erro do puzzle (ex.: timeout do telefone): aplica no monitor.
-        ctx.Connections:Connect(ctx.Map, "OfficeAddError", addError.OnClientEvent, function()
-            addPuzzleError()
-        end)
-    end)
+            -- Trava a camera na CFrame da Part de referencia (Cameras.1).
+            local camera = workspace.CurrentCamera
+            camera.CameraType = Enum.CameraType.Scriptable
+            camera.CFrame = cameraPart.CFrame
 
-    -- Checa a senha digitada quando o player confirma (Enter): acerto deixa o texto verde,
-    -- erro treme e conta +1 erro. Ignora apos acertar (unlocked) ou apos falhar.
-    ctx.Connections:Connect(ctx.Map, "OfficePasswordCheck", textBox.FocusLost, function(enterPressed)
-        if not enterPressed or failed or unlocked or not password then
-            return
-        end
-        if textBox.Text == password then
-            unlocked = true
-            onCorrectPassword()
-        else
-            onWrongPassword()
-        end
-    end)
+            -- Libera/exibe o cursor enquanto o player estiver olhando para o monitor.
+            UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+            UserInputService.MouseIconEnabled = true
 
-    ctx.Connections:Connect(ctx.Map, "OfficeManagerPC", prompt.Triggered, function()
-        if activated or failed then
-            return
-        end
-        activated = true
+            -- Mostra o botao Back para o jogador poder sair do monitor.
+            if backButton then
+                backButton.Visible = true
+            end
 
-        -- Pausa o viewmodel: para o loop de render (liberando a camera) e ESCONDE o modelo do
-        -- item, se houver, sem destrui-lo - assim o :Resume no exitMonitor consegue restaura-lo.
-        local viewmodel = ctx.GetController("ViewmodelController"):GetViewmodel()
-        if viewmodel then
-            viewmodel:Pause()
-        end
+            -- Animacoes de entrada do monitor: so tocam na PRIMEIRA vez que o jogador acessa.
+            if introPlayed then
+                return
+            end
+            introPlayed = true
 
-        -- Trava a camera na CFrame da Part de referencia (Cameras.1).
-        local camera = workspace.CurrentCamera
-        camera.CameraType = Enum.CameraType.Scriptable
-        camera.CFrame = cameraPart.CFrame
+            -- Toda a intro (crescimento + glitch) bloqueia a digitacao; libera ao terminar.
+            beginBusy()
 
-        -- Libera/exibe o cursor enquanto o player estiver olhando para o monitor.
-        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
-        UserInputService.MouseIconEnabled = true
+            -- Com a camera ja posicionada, cresce o TextBox em Y.Scale ate .3 com um spring.
+            task.wait(1)
+            local size = textBox.Size
+            spr.target(textBox, 0.7, 3.5, {
+                Size = UDim2.new(size.X.Scale, size.X.Offset, 0.3, 0),
+            })
 
-        -- Mostra o botao Back para o jogador poder sair do monitor.
-        if backButton then
-            backButton.Visible = true
-        end
-
-        -- Animacoes de entrada do monitor: so tocam na PRIMEIRA vez que o jogador acessa.
-        if introPlayed then
-            return
-        end
-        introPlayed = true
-
-        -- Toda a intro (crescimento + glitch) bloqueia a digitacao; libera ao terminar.
-        beginBusy()
-
-        -- Com a camera ja posicionada, cresce o TextBox em Y.Scale ate .3 com um spring.
-        task.wait(1)
-        local size = textBox.Size
-        spr.target(textBox, 0.7, 3.5, {
-            Size = UDim2.new(size.X.Scale, size.X.Offset, 0.3, 0),
-        })
-
-        -- Quando a animacao de crescimento terminar, escreve o aviso com o efeito "Glitch" e, ao
-        -- terminar, pede ao server para iniciar o puzzle dos telefones e libera o TextBox.
-        spr.completed(textBox, function()
-            task.wait(.5)
-            showWarningGlitch("Pick the next call", function()
-                startPhonePuzzleOnServer()
-                endBusy()
+            -- Quando a animacao de crescimento terminar, escreve o aviso com o efeito "Glitch" e, ao
+            -- terminar, pede ao server para iniciar o puzzle dos telefones e libera o TextBox.
+            spr.completed(textBox, function()
+                task.wait(.5)
+                showWarningGlitch("Pick the next call", function()
+                    startPhonePuzzleOnServer()
+                    endBusy()
+                end)
             end)
         end)
     end)

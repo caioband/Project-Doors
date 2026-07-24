@@ -807,12 +807,10 @@ function RoundService:RunRoundLoop()
             VoteService:ResetVotation()
         end
 
-        -- Espera a votacao iniciar (algum player aciona o botao), com um teto de seguranca.
-        local waitStart = os.clock()
+        -- Espera a votacao iniciar (algum player aciona o botao). Sem votacao iniciada, NAO carrega
+        -- mapa nenhum: o loop fica aqui ate alguem acionar o botao. So depois da votacao concluir e
+        -- que um mapa e escolhido/carregado. (Sem teto de seguranca: nada de carregar mapa sozinho.)
         while VoteService and VoteService.IsVotingActive and not VoteService:IsVotingActive() do
-            if os.clock() - waitStart > 300 then
-                break
-            end
             task.wait(0.5)
         end
 
