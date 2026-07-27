@@ -16,6 +16,8 @@
 local ServerScriptService = game:GetService("ServerScriptService")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
 
 local NPCModules = ServerScriptService.Server.SharedModules.NPC
 local NPCAgent = require(NPCModules.NPCAgent)
@@ -177,6 +179,134 @@ function NPCService:_injectHuntSignal(agent: any)
 end
 
 
+-- Parametros da escolha de um ponto de spawn FORA do campo de visao dos players.
+local SPAWN_SIGHT = {
+	-- Alem desta distancia consideramos que o player nao notaria o spawn, mesmo de frente.
+	SightRange = 140,
+	-- Nunca spawna a menos disso de um player, mesmo com parede no meio (sairia "do nada" ao lado).
+	HardMinDistance = 30,
+	-- Dot minimo entre o LookVector do player e a direcao do ponto para contar como "de frente".
+	-- 0.2 ~= 78 graus para cada lado — conservador de proposito (na duvida, considera visivel).
+	FovDot = 0.2,
+	-- Altura (studs) do "olho" do player e do ponto testado, para o raycast nao rasar o chao.
+	EyeHeight = 2,
+}
+
+
+-- Um player VE este ponto? Combina distancia, orientacao e parede:
+--   * mais perto que HardMinDistance          -> visivel (perto demais, independente de tudo)
+--   * mais longe que SightRange               -> nao visivel
+--   * atras do player (a RootPart acompanha a camera com AutoRotate) -> nao visivel
+--   * qualquer geometria COLIDIVEL no caminho -> nao visivel
+-- Na duvida retorna true (preferimos descartar um node bom a spawnar na cara de alguem).
+local function IsPointVisibleTo(position: Vector3, player: Player, ignore: { Instance }): boolean
+	local character = player.Character
+	local rootPart = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	-- Player morto/sem personagem nao ve nada (nao deve travar a escolha do ponto).
+	if not rootPart or not humanoid or humanoid.Health <= 0 then
+		return false
+	end
+
+	local eye = rootPart.Position + Vector3.new(0, SPAWN_SIGHT.EyeHeight, 0)
+	local target = position + Vector3.new(0, SPAWN_SIGHT.EyeHeight, 0)
+	local delta = target - eye
+	local dist = delta.Magnitude
+
+	if dist <= SPAWN_SIGHT.HardMinDistance then
+		return true
+	end
+	if dist > SPAWN_SIGHT.SightRange then
+		return false
+	end
+	if delta.Unit:Dot(rootPart.CFrame.LookVector) < SPAWN_SIGHT.FovDot then
+		return false
+	end
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = ignore
+	params.IgnoreWater = true
+	-- CRUCIAL: sem isto, as parts marcadoras nao-colidiveis do mapa (ex.: PathfindingObstacles)
+	-- bloqueiam o raycast e TODO node pareceria escondido, tornando a checagem inutil.
+	pcall(function()
+		(params :: any).RespectCanCollide = true
+	end)
+
+	return Workspace:Raycast(eye, delta, params) == nil
+end
+
+
+-- Escolhe um AINode que NENHUM player vivo esteja vendo (aleatorio entre os candidatos, para o
+-- spawn nao ser sempre no mesmo canto). Se todos os nodes estiverem a vista, cai no MAIS DISTANTE
+-- do player mais proximo — o menos ruim.
+function NPCService:_pickHiddenNode(nav: any, model: Model?): Vector3?
+	local nodes = nav and nav.Nodes
+	if not nodes or #nodes == 0 then
+		return nil
+	end
+
+	-- O raycast de visao ignora os personagens (queremos parede, nao corpo) e o proprio NPC.
+	local ignore: { Instance } = {}
+	if model then
+		table.insert(ignore, model)
+	end
+	local players = Players:GetPlayers()
+	for _, player in players do
+		if player.Character then
+			table.insert(ignore, player.Character)
+		end
+	end
+
+	local hidden: { Vector3 } = {}
+	local fallback: Vector3? = nil
+	local fallbackDist = -1
+
+	for _, node in nodes do
+		local position = node.Position
+
+		local visible = false
+		local nearest = math.huge
+		for _, player in players do
+			local rootPart = player.Character and player.Character:FindFirstChild("HumanoidRootPart") :: BasePart?
+			if rootPart then
+				nearest = math.min(nearest, (rootPart.Position - position).Magnitude)
+			end
+			if IsPointVisibleTo(position, player, ignore) then
+				visible = true
+				break
+			end
+		end
+
+		if not visible then
+			table.insert(hidden, position)
+		elseif nearest > fallbackDist then
+			-- Guarda o "menos pior" caso nenhum node escape da visao de todos.
+			fallback = position
+			fallbackDist = nearest
+		end
+	end
+
+	if #hidden > 0 then
+		return hidden[math.random(#hidden)]
+	end
+	return fallback
+end
+
+
+-- Injeta no agente a AUDICAO: a consulta ao NoiseService usada por NPCAgent:Hear. Sem isso o NPC
+-- fica surdo (o :Hear devolve nil sempre) — os NPCs que cacam por visao nem notam.
+function NPCService:_injectNoise(agent: any)
+	local noiseService = self.GetService and self.GetService("NoiseService")
+	if not noiseService then
+		return
+	end
+	agent.QueryNoiseFn = function(position: Vector3, multiplier: number, sinceTime: number, ignore: Instance?)
+		return noiseService:Query(position, multiplier, sinceTime, ignore)
+	end
+end
+
+
 -- Coleta as BaseParts do mapa marcadas com um PathfindingModifier de Label "Obstacle". O NPC as
 -- respeita no fallback de linha reta (nao atravessa), ja que elas sao CanCollide=false e nao
 -- barram fisicamente. Ver NPCAgent:_pathCrossesObstacle.
@@ -217,6 +347,7 @@ function NPCService:SpawnForMap(ctx: any)
 			agent.ObstacleParts = obstacleParts
 			self:_injectDoors(agent, map, doorKnobs)
 			self:_injectHuntSignal(agent)
+			self:_injectNoise(agent)
 			agent:RegisterStates(BaseStates)
 			if behavior and behavior.States then
 				agent:RegisterStates(behavior.States)
@@ -263,6 +394,7 @@ function NPCService:SpawnHunter(map: Model, name: string, targetPlayer: Player?)
 	agent.ObstacleParts = CollectObstacleParts(map)
 	self:_injectDoors(agent, map)
 	self:_injectHuntSignal(agent)
+	self:_injectNoise(agent)
 	agent:RegisterStates(BaseStates)
 	if behavior and behavior.States then
 		agent:RegisterStates(behavior.States)
@@ -275,6 +407,47 @@ function NPCService:SpawnHunter(map: Model, name: string, targetPlayer: Player?)
 	TrackAgent(map, agent)
 	print(string.format("[NPCService] Hunter '%s' spawnado em %s (alvo=%s)",
 		name, map:GetFullName(), tostring(targetPlayer)))
+end
+
+
+-- Spawna um NPC dormente no estado PADRAO do behavior dele (nao em Hunt, como o :SpawnHunter), num
+-- AINode que nenhum player esteja vendo. Usado para o NPC "aparecer no meio da rodada" sem que
+-- ninguem veja o modelo surgir do nada (ver o BusinessMan em MapBehaviors/Office).
+--
+-- Se nao houver nenhum node livre de olhares, usa o mais distante do player mais proximo em vez de
+-- desistir: melhor um spawn discutivel do que a rodada sem NPC.
+-- Retorna true se spawnou.
+function NPCService:SpawnHidden(map: Model, name: string): boolean
+	local model = FindNPCModel(map, name)
+	if not model then
+		warn(string.format("[NPCService] SpawnHidden: NPC '%s' nao encontrado em %s.AIModels", name, map:GetFullName()))
+		return false
+	end
+
+	local nav = NavGraph.new(map:FindFirstChild("AINodes"))
+	local spawnPosition = self:_pickHiddenNode(nav, model)
+
+	SetModelHidden(model, false) -- revela antes do agente teleportar/iniciar
+
+	local behavior = ResolveBehavior(name)
+	local agent = NPCAgent.new(model, behavior and behavior.Config)
+	agent.NavGraph = nav
+	agent.ObstacleParts = CollectObstacleParts(map)
+	agent.SpawnPosition = spawnPosition -- nil => cai no sorteio normal de node
+	self:_injectDoors(agent, map)
+	self:_injectHuntSignal(agent)
+	self:_injectNoise(agent)
+	agent:RegisterStates(BaseStates)
+	if behavior and behavior.States then
+		agent:RegisterStates(behavior.States)
+	end
+	agent:Start(behavior and behavior.StartState or "Idle")
+
+	TrackAgent(map, agent)
+	print(string.format("[NPCService] '%s' spawnado em %s (estado=%s, pos=%s)",
+		name, map:GetFullName(), tostring(behavior and behavior.StartState or "Idle"),
+		spawnPosition and tostring(spawnPosition) or "node aleatorio"))
+	return true
 end
 
 

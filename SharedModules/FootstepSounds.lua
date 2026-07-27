@@ -57,6 +57,50 @@ FootstepSounds.Config = {
 	MaxStepInterval = 0.8,
 }
 
+-- Parametros do sistema de passos por KEYFRAME (server-side, FootstepService). Ao contrario do
+-- Config acima (cadencia por timer, no client), aqui a cadencia vem dos KeyframeEvents "Steps"
+-- das proprias animacoes de andar/correr, e o som e emitido por um AudioEmitter que e redirecionado
+-- para o pe que acabou de pisar. Os asset ids sao OS MESMOS (FootstepSounds.Sounds/Custom).
+FootstepSounds.EmitterConfig = {
+	-- Nome do AudioEmitter criado dentro do pe (o client usa para mutar o proprio passo).
+	EmitterName = "FootstepEmitter",
+	-- Nome do AudioPlayer (filho do emitter) que toca cada passo.
+	PlayerName = "FootstepPlayer",
+	-- Grupo de interacao: precisa casar com o do AudioListener do personagem
+	-- (AudioListenerController usa "General").
+	AudioInteractionGroup = "General",
+	-- Volume de cada passo.
+	Volume = 0.5,
+	-- Tom/velocidade do passo. 1 = duracao original do asset (a cadencia ja vem da animacao,
+	-- entao NAO normalizamos a duracao como no sistema por timer).
+	PlaybackSpeed = 1,
+	-- Atenuacao 3D: audivel em cheio ate RollOffMinDistance e some em RollOffMaxDistance.
+	RollOffMinDistance = 5,
+	RollOffMaxDistance = 35,
+	-- Intervalo minimo (s) entre dois passos do MESMO pe. Protege contra o marker disparar em
+	-- duplicidade (ex.: duas tracks replicadas da mesma animacao no server).
+	MinSideInterval = 0.12,
+}
+
+-- Quanto BARULHO cada passo faz para a IA (NoiseService/FootstepService). Nao tem relacao com o
+-- volume que os jogadores ouvem: e o raio, em studs, em que um NPC que caca por som pode perceber
+-- o passo.
+--
+-- O raio vem da VELOCIDADE horizontal do personagem no instante do passo, nao da animacao — assim
+-- nao acoplamos aos asset ids do HumanoidController e o agachado (WalkSpeed 3) fica naturalmente
+-- quase mudo:
+--     radius = clamp(BaseRadius * velocidade / BaseSpeed, MinRadius, MaxRadius)
+-- Com os valores abaixo: andar (8) ~= 28, correr (20) ~= 55, agachado (3) ~= 10.
+FootstepSounds.NoiseConfig = {
+	-- Raio de referencia, na velocidade BaseSpeed.
+	BaseRadius = 28,
+	-- Velocidade (studs/s) de referencia (WalkSpeed padrao do HumanoidController).
+	BaseSpeed = 8,
+	-- Limites do raio calculado.
+	MinRadius = 6,
+	MaxRadius = 55,
+}
+
 -- Material usado quando o material atual nao tem entrada propria.
 FootstepSounds.DefaultMaterial = Enum.Material.Plastic
 
@@ -228,6 +272,36 @@ end
 -- Sorteia um asset id valido para o material/variant, evitando `exclude` (ultimo som tocado).
 function FootstepSounds.GetRandomId(material: Enum.Material, variant: string?, exclude: AssetId?): AssetId?
 	return pickRandomValid(FootstepSounds.GetForMaterial(material, variant), exclude)
+end
+
+-- Raycast curto para baixo a partir do personagem para inspecionar a peca do chao. Retorna:
+--   custom  -> valor do atributo "CustomFootstep" da peca (string), se houver (tem prioridade);
+--   variant -> MaterialVariant da peca (Humanoid.FloorMaterial so da o Enum.Material base), se houver.
+-- Ambos podem ser nil. Usado pelo FootstepController (client) e pelo FootstepService (server).
+function FootstepSounds.GetFloorInfo(character: Model, rootPart: BasePart): (string?, string?)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { character }
+	params.IgnoreWater = true
+
+	local result = workspace:Raycast(rootPart.Position, Vector3.new(0, -10, 0), params)
+	if not result or not result.Instance then
+		return nil, nil
+	end
+
+	local instance = result.Instance
+	local custom: string? = nil
+	local attr = instance:GetAttribute("CustomFootstep")
+	if typeof(attr) == "string" and attr ~= "" then
+		custom = attr
+	end
+
+	local variant: string? = nil
+	if instance.MaterialVariant ~= "" then
+		variant = instance.MaterialVariant
+	end
+
+	return custom, variant
 end
 
 -- Sorteia um asset id valido para uma superficie customizada (chave do atributo "CustomFootstep"),

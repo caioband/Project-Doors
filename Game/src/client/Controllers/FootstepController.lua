@@ -1,11 +1,17 @@
 --!strict
 -- FootstepController (client)
--- Toca sons de passos customizados para o personagem de TODOS os jogadores de acordo com o material
--- do chao (Enum.Material) e REMOVE o som de passos padrao do Roblox de cada um.
+-- Toca o som de passos do PROPRIO jogador de acordo com o material do chao (Enum.Material) e REMOVE
+-- o som de passos padrao do Roblox do personagem de TODOS.
 --
--- Roda em cada cliente e acompanha o personagem de cada Player; os sons ficam parented no
--- HumanoidRootPart de cada personagem, entao sao espaciais (voce ouve os passos dos outros conforme
--- a posicao deles).
+-- Divisao com o FootstepService (server): os passos dos OUTROS jogadores vem de la, dirigidos pelos
+-- KeyframeEvents "Steps" das animacoes e emitidos por um AudioEmitter no pe que pisou. Este
+-- controller cuida so do passo que o dono ouve (cadencia por timer, som no HumanoidRootPart) — por
+-- isso PLAY_FOR_LOCAL_PLAYER_ONLY: sem esse gate, cada passo alheio tocaria duas vezes.
+-- Pelo mesmo motivo, o AudioEmitter dinamico do PROPRIO personagem e silenciado localmente
+-- (:_muteOwnDynamicFootsteps) — mudanca local, que nao replica: os outros continuam ouvindo.
+--
+-- O rastreio continua sendo de TODOS os personagens porque a silenciacao do passo padrao do Roblox
+-- (som "Running") precisa acontecer para cada um deles.
 --
 -- O som padrao de passos e o "Running" que o RbxCharacterSounds cria dentro do HumanoidRootPart.
 -- Em vez de destrui-lo (o RbxCharacterSounds mantem referencia e voltaria a setar propriedades num
@@ -32,10 +38,24 @@ local FootstepSounds = require(ReplicatedStorage.Shared.SharedModules.FootstepSo
 -- Nome do som de passos padrao criado pelo RbxCharacterSounds (em HumanoidRootPart).
 local DEFAULT_FOOTSTEP_SOUND_NAME = "Running"
 
+-- Toca o passo por timer apenas para o personagem do jogador local (os demais sao servidos pelo
+-- FootstepService). Deixe false para voltar ao comportamento antigo (todos por timer) — mas ai
+-- desligue tambem o FootstepService, senao os passos alheios dobram.
+local PLAY_FOR_LOCAL_PLAYER_ONLY = true
+
+-- Grupo de interacao usado para silenciar LOCALMENTE o AudioEmitter dinamico do proprio personagem:
+-- nenhum AudioListener escuta este grupo (o do AudioListenerController e "General"), e a alteracao
+-- feita aqui nao replica, entao os outros jogadores seguem ouvindo o passo normalmente.
+local MUTED_INTERACTION_GROUP = "LocalFootstepMuted"
+
+local LocalPlayer = Players.LocalPlayer
+
 -- Estado por personagem rastreado.
 type Tracked = {
 	humanoid: Humanoid,
 	rootPart: BasePart,
+	-- Se e o personagem do jogador local (define quem toca o passo por timer).
+	isLocal: boolean,
 	-- Tempo (s) acumulado desde o ultimo passo; comparado ao intervalo (por velocidade). Resetado
 	-- quando o personagem para.
 	timeSinceStep: number,
@@ -75,34 +95,32 @@ function FootstepController:_silenceDefaultFootsteps(rootPart: BasePart)
 	rootPart.ChildAdded:Connect(silence)
 end
 
+-- Tira o AudioEmitter dinamico (criado pelo FootstepService no pe do personagem) do grupo de
+-- interacao do listener, SO NESTE CLIENT: o dono deixa de ouvir o proprio passo dinamico e continua
+-- ouvindo apenas o passo por timer deste controller. Como o emitter e reparentado entre os pes a
+-- cada passo, tambem acompanhamos DescendantAdded (a operacao e idempotente).
+function FootstepController:_muteOwnDynamicFootsteps(character: Model)
+	local emitterName = FootstepSounds.EmitterConfig.EmitterName
+
+	local function mute(instance: Instance)
+		if instance.Name == emitterName and instance:IsA("AudioEmitter") then
+			instance.AudioInteractionGroup = MUTED_INTERACTION_GROUP
+		end
+	end
+
+	for _, descendant in character:GetDescendants() do
+		mute(descendant)
+	end
+	character.DescendantAdded:Connect(mute)
+end
+
 -- Raycast curto para baixo a partir do personagem para inspecionar a peca do chao. Retorna:
 --   custom  -> valor do atributo "CustomFootstep" da peca (string), se houver (tem prioridade);
 --   variant -> MaterialVariant da peca (Humanoid.FloorMaterial so da o Enum.Material base), se houver.
 -- Ambos podem ser nil.
+-- (implementacao compartilhada com o FootstepService, no modulo FootstepSounds)
 function FootstepController:_getFloorInfo(character: Model, rootPart: BasePart): (string?, string?)
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	params.FilterDescendantsInstances = { character }
-	params.IgnoreWater = true
-
-	local result = workspace:Raycast(rootPart.Position, Vector3.new(0, -10, 0), params)
-	if not result or not result.Instance then
-		return nil, nil
-	end
-
-	local instance = result.Instance
-	local custom: string? = nil
-	local attr = instance:GetAttribute("CustomFootstep")
-	if typeof(attr) == "string" and attr ~= "" then
-		custom = attr
-	end
-
-	local variant: string? = nil
-	if instance.MaterialVariant ~= "" then
-		variant = instance.MaterialVariant
-	end
-
-	return custom, variant
+	return FootstepSounds.GetFloorInfo(character, rootPart)
 end
 
 -- Pre-carrega TODOS os sons do catalogo, deixa-os em cache como templates e calcula o PlaybackSpeed
@@ -116,6 +134,9 @@ function FootstepController:_loadSounds()
 	self._cacheFolder = folder
 
 	-- Cria um template mudo por asset id e registra no cache (basePlaybackSpeed ajustado apos load).
+	-- Junto criamos um AudioPlayer por id (AutoLoad ligado, nunca tocado): ele nao entra no cache,
+	-- serve so para o engine ja ter o asset carregado na API de audio nova quando o FootstepService
+	-- mandar o AudioEmitter do personagem tocar — senao o PRIMEIRO passo de cada som sairia atrasado.
 	local templates: { Sound } = {}
 	for _, assetId in FootstepSounds.GetAllIds() do
 		local sound = Instance.new("Sound")
@@ -123,6 +144,11 @@ function FootstepController:_loadSounds()
 		sound.Parent = folder
 		self._soundCache[assetId] = { template = sound, basePlaybackSpeed = 1 }
 		table.insert(templates, sound)
+
+		local warmup = Instance.new("AudioPlayer")
+		warmup.AssetId = "rbxassetid://" .. assetId
+		warmup.Volume = 0
+		warmup.Parent = folder
 	end
 
 	if #templates > 0 then
@@ -205,9 +231,16 @@ function FootstepController:_trackCharacter(character: Model)
 
 	self:_silenceDefaultFootsteps(rootPart)
 
+	local isLocal = Players:GetPlayerFromCharacter(character) == LocalPlayer
+	if isLocal then
+		-- O dono nao ouve o proprio passo dinamico (server); ouve so o passo por timer daqui.
+		self:_muteOwnDynamicFootsteps(character)
+	end
+
 	self._tracked[character] = {
 		humanoid = humanoid,
 		rootPart = rootPart,
+		isLocal = isLocal,
 		timeSinceStep = 0,
 	}
 
@@ -240,9 +273,15 @@ function FootstepController:_update(character: Model, state: Tracked, dt: number
 		return
 	end
 
+	-- Os passos dos outros jogadores vem do FootstepService (por keyframe, no pe); aqui so o proprio.
+	if PLAY_FOR_LOCAL_PLAYER_ONLY and not state.isLocal then
+		state.timeSinceStep = 0
+		return
+	end
+
 	-- O player local agachado nao faz barulho de passos (o agachar e estado local, vindo do
 	-- HumanoidController). So vale para o proprio personagem; os demais nao tem esse estado aqui.
-	if character == Players.LocalPlayer.Character then
+	if state.isLocal then
 		local HumanoidController = self.GetController and self.GetController("HumanoidController")
 		if HumanoidController and HumanoidController:IsCrouchingState() then
 			state.timeSinceStep = 0

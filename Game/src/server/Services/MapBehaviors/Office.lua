@@ -35,6 +35,13 @@ local FAILURE_RING_TIME = 30
 -- Duracao (s) do fechamento das portas do elevador na fase de fuga (OnEscapeEnd).
 local DOOR_CLOSE_TIME = 2.2
 
+-- BusinessMan: chance (0..1) de ele aparecer na rodada e a janela (s, contada do OnLoad) em que o
+-- spawn acontece. Ele nao esta no mapa desde o inicio: fica dormente e surge no meio da rodada,
+-- sempre num AINode fora do campo de visao dos players (ver NPCService:SpawnHidden).
+local BUSINESSMAN_SPAWN_CHANCE = 0.99
+local BUSINESSMAN_SPAWN_MIN_TIME = 60
+local BUSINESSMAN_SPAWN_MAX_TIME = 90
+
 
 -- Resolve um caminho aninhado a partir de uma instancia raiz (nil se algum no faltar).
 local function resolve(root: Instance?, ...: string): Instance?
@@ -209,6 +216,30 @@ function Office.OnLoad(ctx)
     -- cacadora (estado Hunt) correndo atras de quem falhou. Ver NPCService / SharedModules.NPC.
     local NPCService = ctx.GetService("NPCService")
     NPCService:HideNPCInMap(ctx.Map, "Secretary")
+
+    -- BusinessMan: tambem NAO spawna na carga. Fica dormente e, com BUSINESSMAN_SPAWN_CHANCE de
+    -- chance, aparece num instante sorteado entre BUSINESSMAN_SPAWN_MIN_TIME e MAX_TIME segundos de
+    -- rodada, num AINode que ninguem esteja vendo. Diferente da Secretary ele nao comeca cacando:
+    -- entra no estado padrao do behavior (Idle -> Patrol) e caca por BARULHO, nao por visao — ver
+    -- SharedModules.NPC.NPCBehaviors.BusinessMan.
+    NPCService:HideNPCInMap(ctx.Map, "BusinessMan")
+
+    if math.random() <= BUSINESSMAN_SPAWN_CHANCE then
+        local delay = BUSINESSMAN_SPAWN_MIN_TIME
+            + math.random() * (BUSINESSMAN_SPAWN_MAX_TIME - BUSINESSMAN_SPAWN_MIN_TIME)
+        task.delay(delay, function()
+            -- Mapa descarregado/trocado na espera (o RoundService o destroi): nao spawna.
+            if not ctx.Map.Parent then
+                return
+            end
+            NPCService:SpawnHidden(ctx.Map, "BusinessMan")
+        end)
+    end
+
+    -- Ruido do mapa: qualquer AudioPlayer com o atributo "NoiseRadius" (telefones tocando,
+    -- servidores ligando...) passa a atrair o NPC enquanto estiver tocando. O raio e autorado no
+    -- Studio, entao nao ha codigo por puzzle aqui.
+    ctx.GetService("NoiseService"):BindMapAudio(ctx.Map)
 
     local secretarySpawned = false
     ctx.Connections:Connect(ctx.Map, "OfficeSpawnSecretary", SpawnSecretaryRemote.OnServerEvent, function(player: Player)
@@ -723,6 +754,8 @@ function Office.OnUnload(ctx)
     print(string.format("[Office:server] OnUnload (loadId=%d)", ctx.LoadId))
     -- Encerra os NPCs deste mapa (cancela movimento/animacoes) antes do RoundService destruir o mapa.
     ctx.GetService("NPCService"):ClearForMap(ctx.Map)
+    -- Solta os AudioPlayers deste mapa do NoiseService (senao ficariam na tabela apos o Destroy).
+    ctx.GetService("NoiseService"):UnbindMap(ctx.Map)
     -- ConnectionPlus ja desconecta o que foi registrado em ctx.Map; o mapa (e seus sons/telefones)
     -- e destruido pelo RoundService, encerrando qualquer Ring que ainda estivesse tocando.
 end

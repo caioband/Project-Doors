@@ -4,6 +4,8 @@
 -- expoe as PRIMITIVAS de comportamento base compartilhadas por todos os NPCs:
 --   * Movimento com desvio de obstaculos (PathfindingService + Humanoid:MoveTo)
 --   * Sensoriamento: player mais proximo, linha de visao (raycast) e distancias
+--   * Audicao (:Hear): consulta o NoiseService por barulhos audiveis daqui — a base do NPC que
+--     caca por som em vez de por visao (ver NPCBehaviors/BusinessMan)
 --   * Animacoes de locomocao (walk/idle) carregadas do config
 --   * Uma state machine simples (Idle/Patrol/Hunt vem de BaseStates; NPCs podem registrar
 --     estados proprios via NPCBehaviors/<Nome>.lua)
@@ -49,6 +51,10 @@ export type NPCConfig = {
 	PathRecomputeInterval: number?,
 	-- Intervalo (s) do sensoriamento (raycast/scan de players); nao roda todo frame.
 	SenseInterval: number?,
+	-- AUDICAO (ver :Hear). Multiplicador sobre o raio de cada ruido: >1 = ouve mais longe do que o
+	-- ruido "alcanca", <1 = surdo. Intervalo (s) da consulta ao NoiseService (nao roda todo frame).
+	HearingMultiplier: number?,
+	HearInterval: number?,
 	-- Ao spawnar, teleporta o NPC para um node aleatorio da NavGraph (evita modelos autorados
 	-- flutuando fora do navmesh). Ver :_prepareModel.
 	SpawnAtNode: boolean?,
@@ -79,6 +85,8 @@ local DEFAULT_CONFIG: NPCConfig = {
 	PatrolMinNodeDist = 20,
 	PathRecomputeInterval = 0.5,
 	SenseInterval = 0.2,
+	HearingMultiplier = 1,
+	HearInterval = 0.15,
 	SpawnAtNode = true,
 	SpawnHeightOffset = 3,
 	DoorOpenRadius = 5,
@@ -148,6 +156,11 @@ function NPCAgent.new(model: Model, config: NPCConfig?)
 	-- Injetado pelo NPCService: rede de patrulha (AINodes) deste mapa.
 	self.NavGraph = nil :: any
 
+	-- Posicao de spawn EXPLICITA (opcional). Quando setada, o :_prepareModel teleporta para ca em
+	-- vez de sortear um node da NavGraph — e assim que o NPCService spawna um NPC fora do campo de
+	-- visao dos players (ver NPCService:SpawnHidden).
+	self.SpawnPosition = nil :: Vector3?
+
 	-- Injetados pelo NPCService (opcionais): tratamento de portas no caminho. DoorKnobs e a lista de
 	-- Knobs de porta do mapa; OpenDoorFn(knob) abre a porta (via DoorService); IsDoorClosedFn(knob)
 	-- diz se ela esta fechada. Ver :_scanDoors (abre a frente) e :_pickBlockingDoor (NoPath -> porta).
@@ -178,6 +191,13 @@ function NPCAgent.new(model: Model, config: NPCConfig?)
 	-- Sensoriamento (throttle).
 	self._senseAccum = 0
 	self._lastSensed = nil :: Player?
+
+	-- Audicao: consulta ao NoiseService, injetada pelo NPCService (assinatura
+	-- (position, multiplier, sinceTime, ignore) -> NoiseEvent?). Ver :Hear.
+	self.QueryNoiseFn = nil :: ((Vector3, number, number, Instance?) -> any)?
+	self._hearAccum = 0
+	-- Time do ultimo ruido ja consumido: garante que cada evento so seja "ouvido" uma vez.
+	self._lastNoiseTime = 0
 
 	-- Tracks de animacao de locomocao por nome (Walk/Idle/Run) e a track ativa no momento.
 	self._tracks = {} :: { [string]: AnimationTrack }
@@ -284,19 +304,23 @@ function NPCAgent:_prepareModel()
 		end
 	end
 
-	if self.Config.SpawnAtNode and self.NavGraph then
+	-- Destino do spawn: a posicao explicita (se o NPCService escolheu uma) ou um node aleatorio.
+	local target: Vector3? = self.SpawnPosition
+	if not target and self.Config.SpawnAtNode and self.NavGraph then
 		local node = self.NavGraph:GetRandomNode()
-		if node then
-			-- O pivot do modelo e o HumanoidRootPart, que fica ACIMA da base do corpo. Teleportar
-			-- so o pivot para o node enterraria os pes no chao. Compensamos elevando o pivot pela
-			-- distancia do pivot ate a base do modelo, + a folga SpawnHeightOffset (a base cai sobre
-			-- o node e o NPC assenta no chao).
-			local pivotY = self.Model:GetPivot().Position.Y
-			local bbCF, bbSize = self.Model:GetBoundingBox()
-			local pivotToBottom = pivotY - (bbCF.Position.Y - bbSize.Y / 2)
-			local upOffset = pivotToBottom + self.Config.SpawnHeightOffset
-			self.Model:PivotTo(CFrame.new(node.Position + Vector3.new(0, upOffset, 0)))
-		end
+		target = node and node.Position or nil
+	end
+
+	if target then
+		-- O pivot do modelo e o HumanoidRootPart, que fica ACIMA da base do corpo. Teleportar
+		-- so o pivot para o node enterraria os pes no chao. Compensamos elevando o pivot pela
+		-- distancia do pivot ate a base do modelo, + a folga SpawnHeightOffset (a base cai sobre
+		-- o node e o NPC assenta no chao).
+		local pivotY = self.Model:GetPivot().Position.Y
+		local bbCF, bbSize = self.Model:GetBoundingBox()
+		local pivotToBottom = pivotY - (bbCF.Position.Y - bbSize.Y / 2)
+		local upOffset = pivotToBottom + self.Config.SpawnHeightOffset
+		self.Model:PivotTo(CFrame.new(target + Vector3.new(0, upOffset, 0)))
 	end
 end
 
@@ -744,6 +768,37 @@ function NPCAgent:Sense(dt: number): Player?
 	end
 	self._lastSensed = player
 	return player
+end
+
+-- AUDICAO (throttled por HearInterval): retorna o NoiseEvent mais relevante audivel daqui que ainda
+-- NAO foi consumido, ou nil. Requer o QueryNoiseFn injetado pelo NPCService (sem ele o NPC e surdo).
+--
+-- Diferente do :Sense, NAO repete o ultimo resultado entre os intervalos: um ruido e um EVENTO
+-- instantaneo, nao um estado continuo. "nil" aqui significa "nenhum barulho novo", que e exatamente
+-- o que o estado do NPC precisa para contar o silencio e desistir da caca.
+function NPCAgent:Hear(dt: number): any
+	if not self.QueryNoiseFn or not self.RootPart then
+		return nil
+	end
+
+	self._hearAccum += dt
+	if self._hearAccum < self.Config.HearInterval then
+		return nil
+	end
+	self._hearAccum = 0
+
+	local noise = self.QueryNoiseFn(
+		self.RootPart.Position,
+		self.Config.HearingMultiplier,
+		self._lastNoiseTime,
+		self.Model
+	)
+	if not noise then
+		return nil
+	end
+
+	self._lastNoiseTime = noise.Time
+	return noise
 end
 
 --== Ciclo de vida ============================================================================
