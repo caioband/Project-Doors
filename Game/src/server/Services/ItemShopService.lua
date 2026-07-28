@@ -18,14 +18,32 @@ export type Item = {
     Name: string,
     Price: number,
     Icon: string,
+    -- Texto exibido no DetailsContainer quando o item e selecionado.
+    Description: string,
+    -- Nome do modelo em ReplicatedStorage.Assets.Models.Items usado no ViewportFrame
+    -- da tela de detalhes. Opcional: sem ele o viewport fica vazio.
+    Model: string?,
 }
 
 -- Lista de itens renderizados pela loja. Editar aqui para adicionar/remover itens.
+-- Só entra aqui item IMPLEMENTADO de ponta a ponta (efeito da compra + callbacks da Hotbar): um
+-- item listado sem implementacao vira dinheiro jogado fora para o jogador. Hoje so a Flashlight
+-- tem os dois lados prontos (FlashlightService + HotbarHandlerController).
+--
+-- Preco da Flashlight: o jogador comeca a sessao com $0 (CurrencyService.STARTING_BALANCE) e uma
+-- rodada boa rende ~$150-280 (loot ate ~$180 com a mochila cheia + $50 por puzzle resolvido, ver
+-- CollectablesService/RoundService.PUZZLE_REWARD) — mas SO se ele escapar vivo: morrer zera a
+-- rodada inteira. $100 deixa a lanterna ao alcance de UMA fuga bem-sucedida: a primeira rodada e
+-- jogada no escuro e o objetivo dela e sair vivo com dinheiro para comprar a luz da proxima.
 local Items: { Item } = {
-    { Id = "flashlight", Name = "Flashlight", Price = 50, Icon = "rbxassetid://0" },
-    { Id = "lighter", Name = "Lighter", Price = 75, Icon = "rbxassetid://0" },
-    { Id = "vitamins", Name = "Vitamins", Price = 120, Icon = "rbxassetid://0" },
-    { Id = "crucifix", Name = "Crucifix", Price = 250, Icon = "rbxassetid://0" },
+    {
+        Id = "flashlight",
+        Name = "Flashlight",
+        Price = 100,
+        Icon = "rbxassetid://0",
+        Description = "A handheld flashlight. Lights up the room ahead of you while equipped.",
+        Model = "Flashlight",
+    },
 }
 
 -- Indice por Id para consultas rapidas.
@@ -73,13 +91,25 @@ local function EnsureRemotes()
 end
 
 
--- Retorna o valor atual da moeda do jogador (via leaderstats). nil se nao houver sistema de moeda.
-local function GetCurrency(player: Player): IntValue?
-    local leaderstats = player:FindFirstChild("leaderstats")
-    if not leaderstats then
-        return nil
+-- Cobra o preco do item. O CurrencyService e o dono do saldo (leaderstats.Coins); sem ele
+-- registrado, cai no acesso direto ao leaderstats e, na falta dele tambem, a compra e liberada
+-- (nao trava a loja num servidor sem sistema de moeda).
+local function TryCharge(player: Player, price: number): boolean
+    local CurrencyService = ItemShopService.GetService and ItemShopService.GetService("CurrencyService")
+    if CurrencyService then
+        return CurrencyService:TrySpend(player, price)
     end
-    return leaderstats:FindFirstChild(CURRENCY_NAME) :: IntValue?
+
+    local leaderstats = player:FindFirstChild("leaderstats")
+    local currency = leaderstats and leaderstats:FindFirstChild(CURRENCY_NAME) :: IntValue?
+    if not currency then
+        return true
+    end
+    if currency.Value < price then
+        return false
+    end
+    currency.Value -= price
+    return true
 end
 
 
@@ -101,6 +131,8 @@ local function OnGetItems(player: Player): { any }
             Name = item.Name,
             Price = item.Price,
             Icon = item.Icon,
+            Description = item.Description,
+            Model = item.Model,
             Owned = owned[item.Id] == true,
         })
     end
@@ -124,12 +156,8 @@ local function OnBuyItem(player: Player, itemId: any): { success: boolean, messa
         return { success = false, message = "You already own this item." }
     end
 
-    local currency = GetCurrency(player)
-    if currency then
-        if currency.Value < item.Price then
-            return { success = false, message = "You don't have enough " .. CURRENCY_NAME .. "." }
-        end
-        currency.Value -= item.Price
+    if not TryCharge(player, item.Price) then
+        return { success = false, message = "You don't have enough " .. CURRENCY_NAME .. "." }
     end
 
     GrantItem(player, item)

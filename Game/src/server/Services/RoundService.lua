@@ -55,6 +55,12 @@ local ESCAPE_TICK = 0.2
 -- Folga (studs) somada a meia-extensao da area para a checagem "player dentro" ser tolerante.
 local ESCAPE_AREA_PADDING = 1
 
+-- Dinheiro que cada puzzle resolvido no mapa vale. Assim como o valor dos itens coletados, ele
+-- fica PENDENTE durante a rodada e so e creditado se o player escapar vivo (ver PayEscapees).
+-- Balanceamento: os dois puzzles do Office valem juntos o mesmo que um item grande, ver
+-- CollectablesService.
+local PUZZLE_REWARD = 50
+
 -- Nome do mapa usado quando nao ha mapeamento especifico para a porta vencedora.
 local DEFAULT_MAP = "Office"
 
@@ -323,6 +329,8 @@ type PlayerRoundStats = {
     Downs: number,        -- quantas vezes entrou em Downed
     AliveAccum: number,   -- segundos acumulados com State == "Alive"
     AliveSince: number?,  -- os.clock de quando entrou em "Alive" (nil se nao esta vivo agora)
+    Items: number,        -- itens coletaveis pegos (reportados pelo CollectablesService)
+    Pending: number,      -- dinheiro acumulado na rodada (itens + puzzles), pago so se escapar
 }
 
 -- Estatisticas da rodada atual, por player. Vazio fora de uma rodada ativa.
@@ -377,7 +385,7 @@ end
 
 -- Cria a entrada de estatisticas de um player e liga o rastreio do personagem atual + respawns.
 local function TrackPlayerStats(player: Player)
-    RoundStats[player] = { Puzzles = 0, Downs = 0, AliveAccum = 0, AliveSince = nil }
+    RoundStats[player] = { Puzzles = 0, Downs = 0, AliveAccum = 0, AliveSince = nil, Items = 0, Pending = 0 }
     if player.Character then
         BindStatsCharacter(player, player.Character)
     end
@@ -411,20 +419,44 @@ local function StartRoundStats()
 end
 
 
--- Contabiliza um puzzle resolvido por um player. Chamado pelos MapBehaviors (server) quando o
--- player resolve um puzzle do mapa. No-op se nao houver rodada sendo contabilizada.
+-- Contabiliza um puzzle resolvido por um player e acumula PUZZLE_REWARD no dinheiro PENDENTE
+-- dele (so vira saldo se ele escapar vivo). Chamado pelos MapBehaviors (server) quando o player
+-- resolve um puzzle do mapa. No-op se nao houver rodada sendo contabilizada.
 function RoundService:AddPuzzleSolved(player: Player)
     local st = RoundStats[player]
-    if st then
-        st.Puzzles += 1
+    if not st then
+        return
     end
+
+    st.Puzzles += 1
+    st.Pending += PUZZLE_REWARD
 end
 
 
--- Fecha a contabilizacao da rodada (fecha os trechos vivos em aberto), desliga o rastreio e
--- envia a cada player presente as suas estatisticas (RoundResults). Chamado ao fim da fase de
--- fuga, quando os players ja foram teleportados de volta para a VotingRoom.
-local function FinalizeAndSendResults()
+-- Contabiliza um item coletavel pego por um player e acumula o valor dele no dinheiro PENDENTE
+-- (creditado so na fuga bem-sucedida, ver PayEscapees). Alimenta o "Items Collected" e o
+-- "Total Earned" da tela de resultados. No-op se nao houver rodada sendo contabilizada.
+function RoundService:AddItemCollected(player: Player, value: number)
+    local st = RoundStats[player]
+    if not st then
+        return
+    end
+
+    st.Items += 1
+    st.Pending += (type(value) == "number" and value or 0)
+end
+
+
+-- Fecha a contabilizacao da rodada (fecha os trechos vivos em aberto), PAGA quem escapou vivo,
+-- desliga o rastreio e envia a cada player presente as suas estatisticas (RoundResults). Chamado
+-- ao fim da fase de fuga, quando os players ja foram teleportados de volta para a VotingRoom.
+--
+-- `escaped` e o conjunto de players que estavam vivos DENTRO de uma area de fuga no instante em
+-- que o countdown acabou (montado pelo RunEscapePhase). So eles recebem o dinheiro acumulado na
+-- rodada; quem morreu ou ficou para tras perde tudo que carregava e sai com $0. Se vier nil (mapa
+-- sem EscapeArea, ou seja, sem fase de fuga), cai no criterio de "estar vivo no fim" para nao
+-- deixar ninguem sem pagamento por falta de area.
+local function FinalizeAndSendResults(escaped: { [Player]: boolean }?)
     if not StatsActive then
         return
     end
@@ -443,14 +475,34 @@ local function FinalizeAndSendResults()
     end
     StatConnections = {}
 
-    if RoundResultsRemote then
-        for _, player in ipairs(Players:GetPlayers()) do
-            local st = RoundStats[player]
-            if st then
+    -- Total de coletaveis que existiam no mapa: e o denominador do "itens pegos / itens no mapa".
+    local CollectablesService = RoundService.GetService and RoundService.GetService("CollectablesService")
+    local itemsTotal = (CollectablesService and CollectablesService:GetTotalItems()) or 0
+    local CurrencyService = RoundService.GetService and RoundService.GetService("CurrencyService")
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        local st = RoundStats[player]
+        if st then
+            -- Escapou? So entao o pendente da rodada vira saldo de verdade.
+            local character = player.Character
+            local didEscape = if escaped
+                then escaped[player] == true
+                else character ~= nil and character:GetAttribute("State") == "Alive"
+
+            local earned = if didEscape then st.Pending else 0
+            if earned > 0 and CurrencyService then
+                CurrencyService:Award(player, earned)
+            end
+
+            if RoundResultsRemote then
                 RoundResultsRemote:FireClient(player, {
                     puzzles = st.Puzzles,
                     downs = st.Downs,
                     aliveTime = math.floor(st.AliveAccum),
+                    itemsCollected = st.Items,
+                    itemsTotal = itemsTotal,
+                    earned = earned,
+                    escaped = didEscape,
                 })
             end
         end
@@ -463,8 +515,9 @@ end
 -- Conduz a fase de fuga apos o timer da rodada zerar: liga os billboards das areas, conta quantos
 -- players elegiveis (vivos) estao dentro e conduz o countdown (30s ao primeiro entrar; 5s quando
 -- todos os elegiveis estao dentro, inclusive solo). Ao encerrar (deadline ou teto de seguranca),
--- teleporta todos de volta para a VotingRoom. Bloqueia ate terminar. Aborta se o mapa for
--- trocado/descarregado (LoadId/CurrentMap mudarem).
+-- teleporta todos de volta para a VotingRoom e PAGA quem escapou (estava vivo dentro de uma area
+-- no instante final). Bloqueia ate terminar. Aborta se o mapa for trocado/descarregado
+-- (LoadId/CurrentMap mudarem) — nesse caso ninguem recebe, pois a rodada nao chegou ao fim.
 local function RunEscapePhase(loadId: number)
     local map = CurrentMap
     if not map then
@@ -483,10 +536,16 @@ local function RunEscapePhase(loadId: number)
     local countdownActive = false
     local deadline = 0
 
+    -- Quem esta vivo DENTRO de uma area de fuga. Reescrito a cada tick, entao ao sair do laco ele
+    -- guarda a foto do instante em que o countdown acabou — e essa foto que define quem escapou
+    -- (e, portanto, quem recebe o dinheiro da rodada). Ver FinalizeAndSendResults.
+    local escaped: { [Player]: boolean } = {}
+
     while LoadId == loadId and CurrentMap == map do
         -- Conta players elegiveis (personagem vivo) e quantos deles estao dentro de alguma area.
         local totalEligible = 0
         local insideEligible = 0
+        table.clear(escaped)
         for _, player in ipairs(Players:GetPlayers()) do
             local character = player.Character
             local root = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
@@ -494,6 +553,7 @@ local function RunEscapePhase(loadId: number)
                 totalEligible += 1
                 if IsInsideAnyArea(root.Position, areas) then
                     insideEligible += 1
+                    escaped[player] = true
                 end
             end
         end
@@ -550,9 +610,9 @@ local function RunEscapePhase(loadId: number)
         end)
     end
 
-    -- Players ja de volta na VotingRoom: fecha a contabilizacao e envia a cada um as estatisticas
-    -- da rodada (o cliente exibe a ResultsGUI).
-    FinalizeAndSendResults()
+    -- Players ja de volta na VotingRoom: fecha a contabilizacao, PAGA quem escapou vivo e envia a
+    -- cada um as estatisticas da rodada (o cliente exibe a ResultsGUI).
+    FinalizeAndSendResults(escaped)
 end
 
 
@@ -714,6 +774,19 @@ function RoundService:LoadMap(mapName: string): Model?
     end
 
     TeleportPlayersToMap(map)
+
+    -- Loot da rodada: sorteia os itens coletaveis nos pontos da Folder CollectableItemSpawns do
+    -- mapa e zera as mochilas. Generico (todo mapa que tiver a Folder ganha itens), por isso fica
+    -- aqui e nao no behavior. No-op silencioso em mapas sem a Folder.
+    local CollectablesService = self.GetService and self.GetService("CollectablesService")
+    if CollectablesService then
+        local ok, err = pcall(function()
+            CollectablesService:SetupMap(map)
+        end)
+        if not ok then
+            warn(string.format("[RoundService] CollectablesService:SetupMap('%s') erro: %s", mapName, tostring(err)))
+        end
+    end
 
     -- Resolve e roda o comportamento server do mapa.
     local behavior = RequireBehavior(mapName)

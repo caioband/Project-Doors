@@ -2,7 +2,8 @@
 -- Contraparte client das estatisticas de rodada do RoundService. Quando o player e teleportado de
 -- volta para a VotingRoom, o server envia as estatisticas da rodada (Comms.Round.RoundResults):
 -- puzzles resolvidos, vezes que caiu e tempo total vivo. Este controller entao:
---   1) Preenche os valores nos wrappers da ResultsGUI (ItemValue de cada wrapper).
+--   1) Preenche os valores nos wrappers da ResultsGUI (ItemValue de cada wrapper), o total ganho
+--      na rodada e o PlayerStatus (o dinheiro so e pago a quem escapou vivo).
 --   2) Esconde a Hotbar e libera o mouse (cursor visivel), esconde os wrappers e o Continue e
 --      liga a ResultsGUI.
 --   3) Toca a animacao Cascade "SetupResultsAnim" no Main.
@@ -28,12 +29,17 @@ local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 -- Escalonamento (s) entre a entrada de cada wrapper na animacao em lote (WrapperChildFadeInAnim).
 local WRAPPER_FADE_STAGGER = 0.15
 
+-- Cores do PlayerStatus conforme o desfecho da rodada (escapou vivo x morreu/ficou para tras).
+local STATUS_ESCAPED_COLOR = Color3.fromRGB(0, 255, 0)
+local STATUS_LOST_COLOR = Color3.fromRGB(255, 40, 40)
+
 -- Wrappers da ListContainer e o nome do Frame filho (a instancia que a WrapperChildFadeInAnim
 -- anima e onde ficam ItemName/ItemValue/Icon). A ordem define a entrada escalonada.
 local WRAPPERS = {
     { wrapper = "TimeSurvivedWrapper", child = "TimeSurvived" },
     { wrapper = "DownedTimesWrapper", child = "DownedTimes" },
     { wrapper = "PuzzlesResolvedWrapper", child = "PuzzlesResolved" },
+    { wrapper = "ItemsCollectedWrapper", child = "ItemsCollected" },
 }
 
 -- True enquanto a ResultsGUI esta aberta (guarda callbacks de animacao apos o Continue fechar).
@@ -135,6 +141,33 @@ function ResultsController:_show(data)
     setWrapperValue(listContainer, "TimeSurvivedWrapper", "TimeSurvived", TimerFormat.Format(data.aliveTime))
     setWrapperValue(listContainer, "DownedTimesWrapper", "DownedTimes", tostring(data.downs or 0))
     setWrapperValue(listContainer, "PuzzlesResolvedWrapper", "PuzzlesResolved", tostring(data.puzzles or 0))
+    -- Itens: quantos o player pegou de quantos existiam no mapa.
+    setWrapperValue(
+        listContainer,
+        "ItemsCollectedWrapper",
+        "ItemsCollected",
+        string.format("%d/%d", data.itemsCollected or 0, data.itemsTotal or 0)
+    )
+
+    -- Dinheiro ganho na rodada (itens coletados + bonus dos puzzles). Aparece junto do Continue.
+    -- So quem escapou vivo recebe, entao para os demais o servidor manda 0 aqui.
+    local totalEarned = resolve(main, "InfoContainer", "TotalEarned")
+    if totalEarned and totalEarned:IsA("TextLabel") then
+        totalEarned.Text = string.format("Total Earned: $%d", data.earned or 0)
+        totalEarned.Visible = false
+    end
+
+    -- Desfecho da rodada: e o que explica o "Total Earned: $0" de quem morreu ou ficou para tras.
+    local status = resolve(main, "PlayerStatusContainer", "PlayerStatus")
+    if status and status:IsA("TextLabel") then
+        if data.escaped then
+            status.Text = "You Survived"
+            status.TextColor3 = STATUS_ESCAPED_COLOR
+        else
+            status.Text = "You Didn't Escape"
+            status.TextColor3 = STATUS_LOST_COLOR
+        end
+    end
 
     -- Esconde os wrappers (aparecem so na animacao em lote) e o Continue (aparece so no fim).
     for _, entry in ipairs(WRAPPERS) do
@@ -159,7 +192,15 @@ function ResultsController:_show(data)
 
     local monitor = self:_getMonitor()
 
-    -- Revela os wrappers e toca a animacao em lote nos filhos; ao terminar, mostra o Continue.
+    -- Fim da sequencia: revela o total ganho na rodada e o botao Continue.
+    local function revealFooter()
+        if totalEarned and totalEarned:IsA("TextLabel") then
+            totalEarned.Visible = true
+        end
+        continue.Visible = true
+    end
+
+    -- Revela os wrappers e toca a animacao em lote nos filhos; ao terminar, mostra o rodape.
     local function playWrappersFadeIn()
         if not self.Active or gui.Parent == nil then
             return
@@ -177,7 +218,7 @@ function ResultsController:_show(data)
         end
 
         if not monitor or #children == 0 then
-            continue.Visible = true
+            revealFooter()
             return
         end
 
@@ -185,11 +226,11 @@ function ResultsController:_show(data)
         if batchSignal then
             batchSignal:Connect(function(event)
                 if event == "Completed" and self.Active then
-                    continue.Visible = true
+                    revealFooter()
                 end
             end)
         else
-            continue.Visible = true
+            revealFooter()
         end
     end
 
@@ -236,6 +277,10 @@ function ResultsController:_hide()
                     wrapper.Visible = false
                 end
             end
+        end
+        local totalEarned = resolve(main, "InfoContainer", "TotalEarned")
+        if totalEarned then
+            totalEarned.Visible = false
         end
         local continue = main and main:FindFirstChild("Continue")
         if continue then

@@ -2,6 +2,8 @@
 -- Responsavel por:
 --   * Bindar o ProximityPrompt da VotingRoom para abrir a loja
 --   * Renderizar os itens vindos do servidor (GetItems) clonando o template
+--   * Selecionar um item pelo DetailsButton do card e exibir o DetailsContainer
+--     (nome, descricao e o modelo girando no ViewportFrame)
 --   * Enviar pedidos de compra (BuyItem) e exibir erros/respostas via ChooseComponent (Center)
 --   * Criar um Blur de fundo ao abrir a loja
 
@@ -21,6 +23,12 @@ local BLUR_TWEEN = TweenInfo.new(0.4)
 -- Folga somada ao MaxActivationDistance do prompt antes de fechar a loja automaticamente.
 local DISTANCE_BUFFER = 0
 
+-- Preview do item no DetailsContainer: velocidade da rotacao (rad/s) no eixo X e folga da camera
+-- em relacao ao tamanho do modelo (1 = modelo preenchendo o viewport).
+local SPIN_SPEED = math.rad(60)
+local VIEWPORT_FOV = 60
+local VIEWPORT_PADDING = 1.6
+
 local ItemShopController = {}
 
 local LocalPlayer = Players.LocalPlayer
@@ -29,7 +37,24 @@ local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 local ScreenGui: ScreenGui
 local Container: Instance
 local ScrollingFrame: ScrollingFrame
-local Template: ImageLabel
+-- Template de uma linha da lista: Wrapper > ItemShopContainer (ItemName, Price, DetailsButton).
+local Template: Frame
+
+local CurrentMoneyLabel: TextLabel
+local CloseButton: TextButton
+
+local DetailsContainer: Frame
+local DetailsTitle: TextLabel
+local DetailsDescription: TextLabel
+local DetailsViewport: ViewportFrame
+local BuyButton: TextButton
+
+-- Item atualmente selecionado (o que o BuyButton compra) e o card correspondente na lista.
+local SelectedItem: any = nil
+local SelectedCard: any = nil
+
+-- Loop de rotacao do modelo no ViewportFrame (ativo apenas com o preview na tela).
+local SpinConnection: RBXScriptConnection? = nil
 
 -- ScreenGuis ocultadas ao abrir a loja, para restaurar o estado original ao fechar.
 local HiddenUIs: { [ScreenGui]: boolean } = {}
@@ -177,11 +202,32 @@ local function StartDistanceWatch(target: Instance, maxDistance: number)
 end
 
 
--- Marca um card como ja adquirido: botao "Owned" e inativo.
-local function MarkOwned(card)
-    card.BuyBtn.Text = "Owned"
-    card.BuyBtn.Active = false
-    card.BuyBtn.AutoButtonColor = false
+-- Atualiza o texto de moeda da loja a partir do leaderstats do jogador.
+local function UpdateCurrency()
+    local leaderstats = LocalPlayer:FindFirstChild("leaderstats")
+    local coins = leaderstats and leaderstats:FindFirstChild("Coins")
+    local value = (coins and coins:IsA("ValueBase") and (coins :: any).Value) or 0
+    CurrentMoneyLabel.Text = string.format("You have: $%d", value)
+end
+
+
+-- Habilita/desabilita o botao de compra do DetailsContainer conforme o item selecionado.
+local function SetBuyState(owned: boolean)
+    BuyButton.Text = owned and "Owned" or "Buy"
+    BuyButton.Active = not owned
+    BuyButton.AutoButtonColor = not owned
+end
+
+
+-- Marca um card como ja adquirido: o preco vira "Owned" (a nova UI nao tem botao por card,
+-- a compra acontece no DetailsContainer) e o botao de compra e travado se o item estiver aberto.
+local function MarkOwned(card: any, item)
+    item.Owned = true
+    card.Price.Text = "Owned"
+
+    if SelectedItem and SelectedItem.Id == item.Id then
+        SetBuyState(true)
+    end
 end
 
 
@@ -234,65 +280,171 @@ local function UnanchorCharacter()
 end
 
 
--- Cria um card de item a partir do template e configura o botao de compra.
-local function RenderItem(item)
-    local card = Template:Clone()
-    card.Name = item.Id
+-- Para a rotacao e esvazia o ViewportFrame (camera + modelo clonado).
+local function ClearViewport()
+    if SpinConnection then
+        SpinConnection:Disconnect()
+        SpinConnection = nil
+    end
+    for _, child in ipairs(DetailsViewport:GetChildren()) do
+        child:Destroy()
+    end
+end
 
-    card.Image = item.Icon
-    card.ItemName.Text = item.Name
-    card.Price.Text = tostring(item.Price)
-    card.Visible = true
-    card.Parent = ScrollingFrame
 
-    if item.Owned then
-        MarkOwned(card)
+-- Localiza o modelo do item em ReplicatedStorage.Assets.Models.Items.
+-- Aceita item.Model (nome explicito) e cai para item.Name como padrao.
+local function FindItemModel(item): Instance?
+    local assets = ReplicatedStorage:FindFirstChild("Assets")
+    local models = assets and assets:FindFirstChild("Models")
+    local items = models and models:FindFirstChild("Items")
+    if not items then
+        return nil
+    end
+    return items:FindFirstChild(item.Model or item.Name)
+end
+
+
+-- Clona o modelo do item dentro do ViewportFrame, enquadra a camera e comeca a girar no eixo X.
+local function RenderPreview(item)
+    ClearViewport()
+
+    local template = FindItemModel(item)
+    if not template then
         return
     end
 
-    card.BuyBtn.Activated:Connect(function()
-        card.BuyBtn.Active = false
+    -- Envelopa em um Model para poder centralizar/girar o conjunto com um unico PivotTo,
+    -- independente do asset ser uma Part solta ou um Model com varias pecas.
+    local holder = Instance.new("Model")
+    local clone = template:Clone()
 
-        -- Ancora o player enquanto processa a compra e a resposta fica na tela.
-        AnchorCharacter()
-
-        local ok, response = pcall(function()
-            return BuyItemRemote:InvokeServer(item.Id)
-        end)
-
-        if not ok or typeof(response) ~= "table" then
-            card.BuyBtn.Active = true
-            ChooseComponent:Show({
-                type = "Center",
-                content = "Something went wrong. Please try again.",
-                confirmText = "OK",
-                confirmCallback = UnanchorCharacter,
-            })
-            return
+    if clone:IsA("BasePart") then
+        clone.Anchored = true
+    end
+    for _, descendant in ipairs(clone:GetDescendants()) do
+        if descendant:IsA("BasePart") then
+            descendant.Anchored = true
         end
+    end
 
-        if response.success then
-            MarkOwned(card)
-            AddToHotbar(item)
-            PreloadItemAssets(item)
-        else
-            card.BuyBtn.Active = true
-        end
+    clone.Parent = holder
+    holder.Parent = DetailsViewport
 
+    -- Centraliza a bounding box do modelo na origem (o pivot passa a ser o centro visual).
+    local boundingCFrame, size = holder:GetBoundingBox()
+    holder.WorldPivot = boundingCFrame
+    holder:PivotTo(CFrame.identity)
+
+    local camera = Instance.new("Camera")
+    camera.FieldOfView = VIEWPORT_FOV
+    -- Recua o suficiente para o maior eixo do modelo caber no frustum, com folga.
+    local distance = (size.Magnitude / 2) / math.tan(math.rad(VIEWPORT_FOV / 2)) * VIEWPORT_PADDING
+    camera.CFrame = CFrame.lookAt(Vector3.new(0, 0, math.max(distance, 1)), Vector3.zero)
+    camera.Parent = DetailsViewport
+    DetailsViewport.CurrentCamera = camera
+
+    local angle = 0
+    SpinConnection = RunService.RenderStepped:Connect(function(dt)
+        angle += dt * SPIN_SPEED
+        holder:PivotTo(CFrame.Angles(angle, 0, 0))
+    end)
+end
+
+
+-- Esconde a tela de detalhes e libera o preview.
+local function HideDetails()
+    SelectedItem = nil
+    SelectedCard = nil
+    DetailsContainer.Visible = false
+    ClearViewport()
+end
+
+
+-- Seleciona um item: preenche nome/descricao, monta o preview e mostra o DetailsContainer.
+local function SelectItem(item, card: any)
+    SelectedItem = item
+    SelectedCard = card
+
+    DetailsTitle.Text = item.Name
+    DetailsDescription.Text = item.Description or ""
+    SetBuyState(item.Owned == true)
+
+    RenderPreview(item)
+    DetailsContainer.Visible = true
+end
+
+
+-- Compra o item selecionado (BuyButton do DetailsContainer).
+local function BuySelectedItem()
+    local item = SelectedItem
+    local card = SelectedCard
+    if not item or not card or item.Owned then
+        return
+    end
+
+    BuyButton.Active = false
+
+    -- Ancora o player enquanto processa a compra e a resposta fica na tela.
+    AnchorCharacter()
+
+    local ok, response = pcall(function()
+        return BuyItemRemote:InvokeServer(item.Id)
+    end)
+
+    if not ok or typeof(response) ~= "table" then
+        BuyButton.Active = true
         ChooseComponent:Show({
             type = "Center",
-            content = response.message,
+            content = "Something went wrong. Please try again.",
             confirmText = "OK",
             confirmCallback = UnanchorCharacter,
         })
+        return
+    end
+
+    if response.success then
+        MarkOwned(card, item)
+        AddToHotbar(item)
+        PreloadItemAssets(item)
+        UpdateCurrency()
+    else
+        BuyButton.Active = true
+    end
+
+    ChooseComponent:Show({
+        type = "Center",
+        content = response.message,
+        confirmText = "OK",
+        confirmCallback = UnanchorCharacter,
+    })
+end
+
+
+-- Cria um card de item a partir do template e liga o DetailsButton a selecao.
+local function RenderItem(item)
+    local wrapper = Template:Clone()
+    wrapper.Name = item.Id
+
+    local card = wrapper:FindFirstChild("ItemShopContainer") :: any
+    card.ItemName.Text = item.Name
+    card.Price.Text = item.Owned and "Owned" or tostring(item.Price)
+
+    wrapper.Visible = true
+    wrapper.Parent = ScrollingFrame
+
+    card.DetailsButton.Activated:Connect(function()
+        SelectItem(item, card)
     end)
 end
 
 
 -- Limpa os cards renderizados (mantendo o template).
 local function ClearItems()
+    HideDetails()
+
     for _, child in ipairs(ScrollingFrame:GetChildren()) do
-        if child:IsA("ImageLabel") and child ~= Template then
+        if child:IsA("Frame") and child ~= Template then
             child:Destroy()
         end
     end
@@ -333,6 +485,7 @@ function ItemShopController:Open(prompt: ProximityPrompt)
         return
     end
 
+    UpdateCurrency()
     HideOtherUIs()
     ShowBlur()
     ToggleFreeMouse()
@@ -353,6 +506,8 @@ function ItemShopController:Close()
     IsOpen = false
 
     StopDistanceWatch()
+    -- Solta o preview: sem isso o RenderStepped continuaria girando um modelo fora da tela.
+    HideDetails()
     ScreenGui.Enabled = false
     RestoreOtherUIs()
     HideBlur()
@@ -366,13 +521,27 @@ end
 
 function ItemShopController:Start()
     ScreenGui = PlayerGui:WaitForChild("ItemShop")
-    local frame = ScreenGui:WaitForChild("Frame")
-    Container = frame:WaitForChild("Container")
+    local main = ScreenGui:WaitForChild("Main")
+    Container = main:WaitForChild("Container")
     ScrollingFrame = Container:WaitForChild("ScrollingFrame")
-    Template = ScrollingFrame:WaitForChild("ItemShopTemplate")
+    Template = ScrollingFrame:WaitForChild("ItemShopWrapper") :: Frame
+    CurrentMoneyLabel = Container:WaitForChild("CurrentMoney") :: TextLabel
+    CloseButton = Container:WaitForChild("CloseButton") :: TextButton
+
+    DetailsContainer = Container:WaitForChild("DetailsContainer") :: Frame
+    DetailsTitle = DetailsContainer:WaitForChild("Label") :: TextLabel
+    DetailsDescription = DetailsContainer:WaitForChild("Description") :: TextLabel
+    DetailsViewport = DetailsContainer:WaitForChild("ViewportContainer"):WaitForChild("ViewportFrame") :: ViewportFrame
+    BuyButton = DetailsContainer:WaitForChild("BuyButton") :: TextButton
 
     Template.Visible = false
+    DetailsContainer.Visible = false
     ScreenGui.Enabled = false
+
+    BuyButton.Activated:Connect(BuySelectedItem)
+    CloseButton.Activated:Connect(function()
+        self:Close()
+    end)
 
     -- (A ScreenGui do ChooseComponent — que precisa continuar visivel para exibir respostas/erros
     -- do servidor — e resolvida sob demanda em GetChooseGui, pois o SharedGuis re-clona no respawn.)
@@ -388,7 +557,7 @@ function ItemShopController:Start()
         end
     end)
 
-    -- Fecha a loja com Escape / B (nao ha botao de fechar na UI).
+    -- Fecha a loja com Escape / B (alem do CloseButton da UI).
     UserInputService.InputBegan:Connect(function(input, gameProcessed)
         if gameProcessed or not IsOpen then
             return
